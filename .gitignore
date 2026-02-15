@@ -1,15 +1,33 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 dist/
 build/
 .eggs/
 *.egg
+
+# Virtual environment
 .venv/
 venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Caches
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Training artifacts
 runs/
 *.pt
 *.pth
