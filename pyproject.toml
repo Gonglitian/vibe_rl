@@ -1,0 +1,14 @@
+[project]
+name = "vibe-rl"
+version = "0.1.0"
+description = "Reinforcement learning experiments"
+readme = "README.md"
+authors = [
+    { name = "Gonglitian", email = "gongc9@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
