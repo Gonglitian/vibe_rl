@@ -7,7 +7,19 @@ authors = [
     { name = "Gonglitian", email = "gongc9@qq.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "jax>=0.4.35",
+    "jaxlib>=0.4.35",
+    "equinox>=0.11.10",
+    "chex>=0.1.89",
+]
+
+[project.optional-dependencies]
+gymnasium = ["gymnasium>=1.0.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
