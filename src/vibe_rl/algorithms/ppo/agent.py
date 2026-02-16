@@ -23,7 +23,6 @@ import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optax
 
 from vibe_rl.algorithms.ppo.config import PPOConfig
 from vibe_rl.algorithms.ppo.network import ActorCategorical, ActorCriticShared, Critic
@@ -118,10 +117,7 @@ class PPO:
             critic = Critic(obs_dim, config.hidden_sizes, key=k2)
             params = ActorCriticParams(actor=actor, critic=critic)
 
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.lr, eps=1e-5),
-        )
+        optimizer = config.make_optimizer()
         opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
 
         return PPOState(
@@ -298,10 +294,7 @@ class PPO:
         flat_advantages = advantages.reshape(batch_size)
         flat_returns = returns.reshape(batch_size)
 
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.lr, eps=1e-5),
-        )
+        optimizer = config.make_optimizer()
 
         def _epoch(carry, _):
             params, opt_state, rng = carry

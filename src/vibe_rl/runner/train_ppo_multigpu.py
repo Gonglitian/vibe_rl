@@ -1,8 +1,10 @@
 """Multi-GPU PPO training via ``jax.pmap``.
 
-Data-parallel PPO across multiple devices using the Stoix "double pmean"
-pattern: gradients are averaged first across the ``vmap`` batch axis
-(within each device), then across devices via ``pmap``.
+Data-parallel PPO across multiple devices. Gradients are averaged
+across devices via ``jax.lax.pmean`` on the ``pmap`` axis. Within each
+device, the loss already averages over the minibatch (which includes
+samples from all vmapped environments), so no separate within-device
+pmean is needed.
 
 The data shape convention is::
 
@@ -44,7 +46,6 @@ import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optax
 
 from vibe_rl.algorithms.ppo.agent import PPO, PPOMetrics, compute_gae
 from vibe_rl.algorithms.ppo.config import PPOConfig
@@ -77,11 +78,9 @@ def train_ppo_multigpu(
     equivalent) so that episodes auto-reset inside the scan.
 
     Data is shaped as ``(n_devices, num_envs, *feature_dims)``. Gradients
-    are synchronised with the double-pmean pattern (Stoix):
-
-    1. ``lax.pmean(grads, axis_name="batch")`` — average across vmapped
-       environments within each device.
-    2. ``lax.pmean(grads, axis_name="device")`` — average across devices.
+    are synchronised across devices via ``lax.pmean(grads, axis_name="device")``.
+    Within each device, the minibatch loss already averages over all samples
+    (including those from different vmapped environments).
 
     Args:
         env: Pure-JAX environment (must auto-reset on done).
@@ -208,7 +207,7 @@ def train_ppo_multigpu(
             trajectories: PPOTransition,
             last_value: chex.Array,
         ) -> tuple[PPOState, PPOMetrics]:
-            """PPO update with double pmean gradient synchronisation.
+            """PPO update with cross-device gradient synchronisation.
 
             Trajectories have shape (T, num_envs, ...).
             """
@@ -231,10 +230,7 @@ def train_ppo_multigpu(
             flat_advantages = advantages.reshape(batch_size)
             flat_returns = returns.reshape(batch_size)
 
-            optimizer = optax.chain(
-                optax.clip_by_global_norm(_ppo_config.max_grad_norm),
-                optax.adam(_ppo_config.lr, eps=1e-5),
-            )
+            optimizer = _ppo_config.make_optimizer()
 
             def _epoch(carry, _):
                 params, opt_state, rng = carry
@@ -298,8 +294,7 @@ def train_ppo_multigpu(
                         eqx.filter_value_and_grad(loss_fn, has_aux=True)(params)
                     )
 
-                    # ---- Double pmean (Stoix pattern) ----
-                    # 1. Average across devices (pmap axis)
+                    # Average gradients across devices (pmap axis)
                     grads = jax.lax.pmean(grads, axis_name="device")
 
                     updates, new_opt_state = optimizer.update(
@@ -345,7 +340,7 @@ def train_ppo_multigpu(
         def _scan_body(
             train_state: PPOTrainState, _: None,
         ) -> tuple[PPOTrainState, PPOMetrics]:
-            rng, collect_key = jax.random.split(train_state.rng)
+            rng, _ = jax.random.split(train_state.rng)
 
             agent_state, trajectories, final_obs, final_env_state, last_value = (
                 _collect_rollout_batch(

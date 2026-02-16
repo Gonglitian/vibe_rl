@@ -26,34 +26,13 @@ OptState: TypeAlias = Any  # optax optimizer state pytree
 
 
 # ---------------------------------------------------------------------------
-# Transition containers (immutable NamedTuples, auto-registered as pytrees)
+# Transition containers — canonical definitions live in dataprotocol.transition;
+# re-exported here for backwards compatibility.
 # ---------------------------------------------------------------------------
-class Transition(NamedTuple):
-    """A single (s, a, r, s', done) experience tuple.
+from vibe_rl.dataprotocol.transition import Transition  # noqa: E402
 
-    All fields are JAX arrays. For batched transitions the leading
-    dimension is the batch size.
-    """
-
-    obs: chex.Array
-    action: chex.Array
-    reward: chex.Array
-    next_obs: chex.Array
-    done: chex.Array
-
-
-class OnPolicyTransition(NamedTuple):
-    """Extended transition for on-policy algorithms (PPO, etc.).
-
-    Includes log_prob and value needed for advantage estimation.
-    """
-
-    obs: chex.Array
-    action: chex.Array
-    reward: chex.Array
-    done: chex.Array
-    log_prob: LogProb
-    value: Value
+# Also re-export the on-policy variant under the legacy alias.
+from vibe_rl.dataprotocol.transition import PPOTransition as OnPolicyTransition  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

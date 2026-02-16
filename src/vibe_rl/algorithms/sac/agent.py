@@ -30,6 +30,7 @@ import jax.numpy as jnp
 import optax
 
 from vibe_rl.algorithms.sac.config import SACConfig
+# Note: optax is still imported for optax.apply_updates in the alpha update path.
 from vibe_rl.algorithms.sac.network import GaussianActor, TwinQNetwork
 from vibe_rl.algorithms.sac.types import SACState
 from vibe_rl.types import Transition
@@ -124,18 +125,9 @@ class SAC:
             obs_dim, action_dim, config.hidden_sizes, key=k_critic
         )
 
-        actor_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.actor_lr),
-        )
-        critic_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.critic_lr),
-        )
-        alpha_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.alpha_lr),
-        )
+        actor_optimizer = config.make_actor_optimizer()
+        critic_optimizer = config.make_critic_optimizer()
+        alpha_optimizer = config.make_alpha_optimizer()
 
         actor_opt_state = actor_optimizer.init(
             eqx.filter(actor, eqx.is_array)
@@ -219,10 +211,7 @@ class SAC:
         target_entropy = -config.target_entropy_scale * action_dim
 
         # --- Critic update ---
-        critic_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.critic_lr),
-        )
+        critic_optimizer = config.make_critic_optimizer()
 
         def critic_loss_fn(critic_params):
             # Current Q-values for actions in the batch
@@ -264,10 +253,7 @@ class SAC:
         new_critic_params = eqx.apply_updates(state.critic_params, critic_updates)
 
         # --- Actor update ---
-        actor_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.actor_lr),
-        )
+        actor_optimizer = config.make_actor_optimizer()
 
         def actor_loss_fn(actor_params):
             actor_keys = jax.random.split(key_actor, batch.obs.shape[0])
@@ -293,10 +279,7 @@ class SAC:
         new_actor_params = eqx.apply_updates(state.actor_params, actor_updates)
 
         # --- Alpha (temperature) update ---
-        alpha_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.alpha_lr),
-        )
+        alpha_optimizer = config.make_alpha_optimizer()
 
         def alpha_loss_fn(log_alpha_val):
             alpha_keys = jax.random.split(key_alpha, batch.obs.shape[0])

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import optax
+
 
 @dataclass(frozen=True)
 class PPOConfig:
@@ -37,3 +39,16 @@ class PPOConfig:
 
     # Architecture
     shared_backbone: bool = False
+
+    def make_optimizer(self) -> optax.GradientTransformation:
+        """Build the optax optimizer chain for this config.
+
+        Returns a single ``GradientTransformation`` that should be
+        constructed **once** and reused for every ``update()`` call so
+        that stateful transforms (e.g. learning-rate schedules) work
+        correctly.
+        """
+        return optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(self.lr, eps=1e-5),
+        )

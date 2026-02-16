@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import optax
+
 
 @dataclass(frozen=True)
 class DQNConfig:
@@ -29,3 +31,16 @@ class DQNConfig:
     epsilon_start: float = 1.0
     epsilon_end: float = 0.01
     epsilon_decay_steps: int = 50_000
+
+    def make_optimizer(self) -> optax.GradientTransformation:
+        """Build the optax optimizer chain for this config.
+
+        Returns a single ``GradientTransformation`` that should be
+        constructed **once** and reused for every ``update()`` call so
+        that stateful transforms (e.g. learning-rate schedules) work
+        correctly.
+        """
+        return optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(self.lr),
+        )

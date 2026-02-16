@@ -174,7 +174,7 @@ def _train_ppo_single(
         def _scan_body(
             train_state: PPOTrainState, _: None,
         ) -> tuple[PPOTrainState, PPOMetrics]:
-            rng, collect_key = jax.random.split(train_state.rng)
+            rng, _ = jax.random.split(train_state.rng)
 
             # Collect a full rollout
             agent_state, trajectories, final_obs, final_env_state, last_value = (
@@ -263,7 +263,7 @@ def _train_ppo_vectorized(
         def _scan_body(
             train_state: PPOTrainState, _: None,
         ) -> tuple[PPOTrainState, PPOMetrics]:
-            rng, collect_key = jax.random.split(train_state.rng)
+            rng, _ = jax.random.split(train_state.rng)
 
             # Collect rollouts from N parallel environments
             agent_state, trajectories, final_obs, final_env_states, last_values = (

@@ -20,7 +20,6 @@ import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optax
 
 from vibe_rl.algorithms.dqn.config import DQNConfig
 from vibe_rl.algorithms.dqn.network import QNetwork
@@ -57,10 +56,7 @@ class DQN:
         q_net = QNetwork(obs_dim, n_actions, config.hidden_sizes, key=k1)
         target_net = QNetwork(obs_dim, n_actions, config.hidden_sizes, key=k1)
 
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.lr),
-        )
+        optimizer = config.make_optimizer()
         opt_state = optimizer.init(eqx.filter(q_net, eqx.is_array))
 
         return DQNState(
@@ -134,10 +130,7 @@ class DQN:
         Returns:
             (new_state, metrics) tuple.
         """
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.lr),
-        )
+        optimizer = config.make_optimizer()
 
         def loss_fn(params):
             # Q(s, a) for chosen actions
@@ -178,7 +171,9 @@ class DQN:
             rng=state.rng,
         )
 
-        frac = jnp.clip(new_step / config.epsilon_decay_steps, 0.0, 1.0)
+        # Report epsilon that was actually used by act() during this step
+        # (act() uses state.step, not the post-increment new_step).
+        frac = jnp.clip(state.step / config.epsilon_decay_steps, 0.0, 1.0)
         epsilon = config.epsilon_start + frac * (config.epsilon_end - config.epsilon_start)
 
         metrics = DQNMetrics(

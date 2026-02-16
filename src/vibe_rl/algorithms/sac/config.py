@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import optax
+
 
 @dataclass(frozen=True)
 class SACConfig:
@@ -39,3 +41,24 @@ class SACConfig:
     # Log-std clamps for the actor
     log_std_min: float = -20.0
     log_std_max: float = 2.0
+
+    def make_actor_optimizer(self) -> optax.GradientTransformation:
+        """Build the actor optimizer chain."""
+        return optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(self.actor_lr),
+        )
+
+    def make_critic_optimizer(self) -> optax.GradientTransformation:
+        """Build the critic optimizer chain."""
+        return optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(self.critic_lr),
+        )
+
+    def make_alpha_optimizer(self) -> optax.GradientTransformation:
+        """Build the alpha (temperature) optimizer chain."""
+        return optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(self.alpha_lr),
+        )
