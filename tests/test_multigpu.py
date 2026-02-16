@@ -7,17 +7,18 @@ can run anywhere without real GPUs.
 from __future__ import annotations
 
 import os
-from pathlib import Path
-
-import chex
-import jax
-import jax.numpy as jnp
-import numpy as np
-import pytest
 
 # Force 4 fake CPU devices for multi-GPU tests.
-# Must be set before any JAX operations.
+# Must be set *before* JAX is imported so the backend sees it at init time.
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
+
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import chex  # noqa: E402
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import pytest  # noqa: E402
 
 from vibe_rl.algorithms.ppo import PPO, PPOConfig
 from vibe_rl.checkpoint import load_checkpoint, save_checkpoint
