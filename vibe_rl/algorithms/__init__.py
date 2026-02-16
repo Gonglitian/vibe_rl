@@ -1,4 +1,4 @@
-from vibe_rl.algorithms.dqn.agent import DQNAgent
+from vibe_rl.algorithms.dqn.agent import DQN
 from vibe_rl.algorithms.dqn.config import DQNConfig
 
-__all__ = ["DQNAgent", "DQNConfig"]
+__all__ = ["DQN", "DQNConfig"]

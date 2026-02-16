@@ -1,49 +1,47 @@
+"""Agent abstractions: functional protocol for JAX agents."""
+
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
-import numpy as np
+import jax
 
 
-class BaseAgent(ABC):
+@runtime_checkable
+class Agent(Protocol):
+    """Functional agent protocol.
+
+    An ``Agent`` is a *namespace* (typically a plain class with only
+    ``@staticmethod`` methods) that exposes three operations:
+
+    * ``init``   – create initial agent state from config
+    * ``act``    – select an action given state + observation
+    * ``update`` – perform one gradient step and return new state + metrics
+
+    All methods are pure functions; mutable state is threaded through
+    explicitly via an ``AgentState``-like NamedTuple.
     """
-    Abstract agent interface.
 
-    An agent encapsulates:
-      - A policy: state -> action   (the `act` method)
-      - A learning rule              (the `learn` method)
-      - Serialization                (save / load)
-    """
+    @staticmethod
+    def init(
+        rng: jax.Array,
+        obs_shape: tuple[int, ...],
+        n_actions: int,
+        config: Any,
+    ) -> Any: ...
 
-    @abstractmethod
-    def act(self, state: np.ndarray, *, explore: bool = True) -> int | np.ndarray:
-        """
-        Select an action given the current state.
+    @staticmethod
+    def act(
+        state: Any,
+        obs: jax.Array,
+        *,
+        explore: bool = True,
+        **kwargs: Any,
+    ) -> tuple[jax.Array, Any]: ...
 
-        Args:
-            state: Current observation.
-            explore: If True, use exploration strategy (e.g., epsilon-greedy).
-                     If False, use greedy policy (evaluation mode).
-        """
-        ...
-
-    @abstractmethod
-    def learn(self) -> dict[str, float]:
-        """
-        Perform one learning update.
-
-        Returns:
-            A dict of metrics (e.g., {"loss": 0.023, "q_mean": 1.45}).
-        """
-        ...
-
-    @abstractmethod
-    def save(self, path: Path | str) -> None:
-        """Save agent parameters to disk."""
-        ...
-
-    @abstractmethod
-    def load(self, path: Path | str) -> None:
-        """Load agent parameters from disk."""
-        ...
+    @staticmethod
+    def update(
+        state: Any,
+        batch: Any,
+        **kwargs: Any,
+    ) -> tuple[Any, Any]: ...

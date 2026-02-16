@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 
-from vibe_rl.algorithms.dqn.agent import DQNAgent
 from vibe_rl.dataprotocol.transition import Transition
 from vibe_rl.env.base import BaseEnv
 from vibe_rl.runner.evaluator import evaluate
@@ -23,7 +22,7 @@ class TrainingRunner:
     def __init__(
         self,
         env: BaseEnv,
-        agent: DQNAgent,
+        agent: Any,
         total_steps: int = 100_000,
         eval_every: int = 5_000,
         eval_episodes: int = 10,
