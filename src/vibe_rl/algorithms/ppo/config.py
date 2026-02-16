@@ -32,5 +32,8 @@ class PPOConfig:
     n_minibatches: int = 4
     n_epochs: int = 4
 
+    # Vectorized environments
+    num_envs: int = 1
+
     # Architecture
     shared_backbone: bool = False

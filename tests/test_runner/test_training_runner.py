@@ -209,6 +209,134 @@ class TestTrainPPO:
         assert jnp.allclose(h1.total_loss, h2.total_loss)
 
 
+# ---- PPO Vectorized runner tests ----
+
+class TestTrainPPOVectorized:
+    def test_basic_vectorized(self):
+        """Train PPO with multiple parallel environments."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        num_envs = 4
+        n_steps = 32
+        ppo_config = PPOConfig(
+            n_steps=n_steps, n_minibatches=2, n_epochs=2,
+            hidden_sizes=(16, 16), num_envs=num_envs,
+        )
+        # total_timesteps = n_updates * n_steps * num_envs
+        # 256 = 2 * 32 * 4
+        runner_config = RunnerConfig(total_timesteps=256, seed=0)
+
+        train_state, history = train_ppo(
+            env, env_params,
+            ppo_config=ppo_config,
+            runner_config=runner_config,
+        )
+
+        n_updates = 256 // (n_steps * num_envs)  # 2
+        assert isinstance(train_state, PPOTrainState)
+        assert isinstance(history, PPOMetricsHistory)
+        assert history.total_loss.shape == (n_updates,)
+        assert history.actor_loss.shape == (n_updates,)
+        assert history.critic_loss.shape == (n_updates,)
+        assert history.entropy.shape == (n_updates,)
+        assert history.approx_kl.shape == (n_updates,)
+        assert int(train_state.agent_state.step) == n_updates
+
+    def test_vectorized_env_obs_shape(self):
+        """env_obs in train state should have leading num_envs dimension."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        num_envs = 4
+        ppo_config = PPOConfig(
+            n_steps=16, n_minibatches=2, n_epochs=1,
+            hidden_sizes=(8, 8), num_envs=num_envs,
+        )
+        runner_config = RunnerConfig(total_timesteps=64, seed=0)
+
+        train_state, _ = train_ppo(
+            env, env_params,
+            ppo_config=ppo_config,
+            runner_config=runner_config,
+        )
+
+        # env_obs should be (num_envs, obs_dim)
+        assert train_state.env_obs.shape == (num_envs, 4)
+
+    def test_vectorized_deterministic(self):
+        """Same seed with vectorized envs produces same results."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        ppo_config = PPOConfig(
+            n_steps=16, n_minibatches=2, n_epochs=1,
+            hidden_sizes=(8, 8), num_envs=4,
+        )
+        runner_config = RunnerConfig(total_timesteps=128, seed=42)
+
+        _, h1 = train_ppo(env, env_params, ppo_config=ppo_config, runner_config=runner_config)
+        _, h2 = train_ppo(env, env_params, ppo_config=ppo_config, runner_config=runner_config)
+
+        assert jnp.allclose(h1.total_loss, h2.total_loss)
+
+    def test_vectorized_explicit_shapes(self):
+        """Vectorized training with explicit obs_shape and n_actions."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        ppo_config = PPOConfig(
+            n_steps=16, n_minibatches=2, n_epochs=1,
+            hidden_sizes=(8, 8), num_envs=4,
+        )
+        runner_config = RunnerConfig(total_timesteps=128, seed=0)
+
+        train_state, history = train_ppo(
+            env, env_params,
+            ppo_config=ppo_config,
+            runner_config=runner_config,
+            obs_shape=(4,),
+            n_actions=2,
+        )
+
+        n_updates = 128 // (16 * 4)  # 2
+        assert int(train_state.agent_state.step) == n_updates
+
+    def test_num_envs_default_is_one(self):
+        """num_envs=1 (default) should use the single-env path."""
+        config = PPOConfig()
+        assert config.num_envs == 1
+
+    def test_vectorized_different_num_envs(self):
+        """Training works with various num_envs values."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        for num_envs in [2, 8]:
+            ppo_config = PPOConfig(
+                n_steps=16, n_minibatches=2, n_epochs=1,
+                hidden_sizes=(8, 8), num_envs=num_envs,
+            )
+            # Ensure total_timesteps is divisible by n_steps * num_envs
+            steps_per_update = 16 * num_envs
+            total = steps_per_update * 2  # 2 updates
+            runner_config = RunnerConfig(total_timesteps=total, seed=0)
+
+            train_state, history = train_ppo(
+                env, env_params,
+                ppo_config=ppo_config,
+                runner_config=runner_config,
+            )
+
+            assert int(train_state.agent_state.step) == 2
+            assert history.total_loss.shape == (2,)
+
+
 # ---- DQN hybrid runner tests ----
 
 class TestTrainDQN:
