@@ -38,6 +38,8 @@ from vibe_rl.algorithms.sac.agent import SAC
 from vibe_rl.algorithms.sac.config import SACConfig
 from vibe_rl.algorithms.sac.types import SACState
 from vibe_rl.env.base import EnvParams, EnvState, Environment
+from vibe_rl.metrics import MetricsLogger
+from vibe_rl.run_dir import RunDir
 from vibe_rl.runner.config import RunnerConfig
 from vibe_rl.types import Transition
 
@@ -131,6 +133,7 @@ def train_sac(
     obs_shape: tuple[int, ...] | None = None,
     action_dim: int | None = None,
     callback: callable | None = None,
+    run_dir: RunDir | None = None,
 ) -> SACTrainResult:
     """Train SAC with a hybrid Python/JAX loop.
 
@@ -146,6 +149,9 @@ def train_sac(
         obs_shape: Observation shape. Inferred from env if ``None``.
         action_dim: Action dimensionality. Inferred from env if ``None``.
         callback: Optional ``callback(step, agent_state, metrics_dict)``.
+        run_dir: Optional :class:`~vibe_rl.run_dir.RunDir` for JSONL
+            metrics logging.  When provided, metrics are written to
+            ``<run_dir>/logs/metrics.jsonl``.
 
     Returns:
         ``SACTrainResult`` with final agent state, episode returns, and
@@ -191,9 +197,15 @@ def train_sac(
             start_step = restored_step + 1
             logger.info("Resumed SAC training from step %d", restored_step)
 
+    # --- Metrics logger ---
+    metrics_logger = (
+        MetricsLogger(run_dir.log_path()) if run_dir is not None else None
+    )
+
     episode_returns: list[float] = []
     metrics_log: list[dict[str, float]] = []
     ep_return = 0.0
+    ep_length = 0
 
     try:
         for step in range(start_step, runner_config.total_timesteps + 1):
@@ -206,11 +218,19 @@ def train_sac(
                 np.asarray(next_obs), bool(done),
             )
             ep_return += float(reward)
+            ep_length += 1
             obs = next_obs
 
             if done:
                 episode_returns.append(ep_return)
+                if metrics_logger is not None:
+                    metrics_logger.write({
+                        "step": step,
+                        "episode_return": ep_return,
+                        "episode_length": ep_length,
+                    })
                 ep_return = 0.0
+                ep_length = 0
 
             if len(buffer) >= runner_config.warmup_steps:
                 batch = buffer.sample(sac_config.batch_size)
@@ -228,6 +248,8 @@ def train_sac(
                         "q_mean": float(metrics.q_mean),
                     }
                     metrics_log.append(record)
+                    if metrics_logger is not None:
+                        metrics_logger.write(record)
                     if callback is not None:
                         callback(step, agent_state, record)
 
@@ -235,6 +257,8 @@ def train_sac(
             if ckpt_mgr is not None:
                 ckpt_mgr.save(step, agent_state)
     finally:
+        if metrics_logger is not None:
+            metrics_logger.close()
         if ckpt_mgr is not None:
             ckpt_mgr.wait()
             ckpt_mgr.close()

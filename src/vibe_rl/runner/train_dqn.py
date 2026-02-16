@@ -42,6 +42,8 @@ from vibe_rl.algorithms.dqn.config import DQNConfig
 from vibe_rl.algorithms.dqn.types import DQNState
 from vibe_rl.dataprotocol.replay_buffer import ReplayBuffer
 from vibe_rl.env.base import EnvParams, EnvState, Environment
+from vibe_rl.metrics import MetricsLogger
+from vibe_rl.run_dir import RunDir
 from vibe_rl.runner.config import RunnerConfig
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,7 @@ def train_dqn(
     obs_shape: tuple[int, ...] | None = None,
     n_actions: int | None = None,
     callback: callable | None = None,
+    run_dir: RunDir | None = None,
 ) -> DQNTrainResult:
     """Train DQN with a hybrid Python/JAX loop.
 
@@ -113,6 +116,9 @@ def train_dqn(
         n_actions: Number of discrete actions. Inferred from env if ``None``.
         callback: Optional ``callback(step, agent_state, metrics_dict)``
             called every ``runner_config.log_interval`` steps.
+        run_dir: Optional :class:`~vibe_rl.run_dir.RunDir` for JSONL
+            metrics logging.  When provided, metrics are written to
+            ``<run_dir>/logs/metrics.jsonl``.
 
     Returns:
         ``DQNTrainResult`` containing final agent state, episode returns,
@@ -154,9 +160,15 @@ def train_dqn(
             start_step = restored_step + 1
             logger.info("Resumed DQN training from step %d", restored_step)
 
+    # --- Metrics logger ---
+    metrics_logger = (
+        MetricsLogger(run_dir.log_path()) if run_dir is not None else None
+    )
+
     episode_returns: list[float] = []
     metrics_log: list[dict[str, float]] = []
     ep_return = 0.0
+    ep_length = 0
 
     try:
         for step in range(start_step, runner_config.total_timesteps + 1):
@@ -167,11 +179,19 @@ def train_dqn(
             # Push to replay buffer (transfers to numpy)
             buffer.push(obs, int(action), float(reward), next_obs, bool(done))
             ep_return += float(reward)
+            ep_length += 1
             obs = next_obs
 
             if done:
                 episode_returns.append(ep_return)
+                if metrics_logger is not None:
+                    metrics_logger.write({
+                        "step": step,
+                        "episode_return": ep_return,
+                        "episode_length": ep_length,
+                    })
                 ep_return = 0.0
+                ep_length = 0
 
             # Train once buffer has enough data
             if len(buffer) >= runner_config.warmup_steps:
@@ -188,6 +208,8 @@ def train_dqn(
                         "epsilon": float(metrics.epsilon),
                     }
                     metrics_log.append(record)
+                    if metrics_logger is not None:
+                        metrics_logger.write(record)
                     if callback is not None:
                         callback(step, agent_state, record)
 
@@ -195,6 +217,8 @@ def train_dqn(
             if ckpt_mgr is not None:
                 ckpt_mgr.save(step, agent_state)
     finally:
+        if metrics_logger is not None:
+            metrics_logger.close()
         if ckpt_mgr is not None:
             ckpt_mgr.wait()
             ckpt_mgr.close()

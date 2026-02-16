@@ -17,7 +17,19 @@ from vibe_rl.algorithms.sac.config import SACConfig
 from vibe_rl.configs import TrainConfig, cli
 from vibe_rl.env import make
 from vibe_rl.env.wrappers import AutoResetWrapper
+from vibe_rl.run_dir import RunDir
 from vibe_rl.runner import train_dqn, train_ppo, train_sac
+
+
+def _algo_name(algo: object) -> str:
+    """Return a short name for the algorithm config."""
+    if isinstance(algo, PPOConfig):
+        return "ppo"
+    if isinstance(algo, DQNConfig):
+        return "dqn"
+    if isinstance(algo, SACConfig):
+        return "sac"
+    return type(algo).__name__.lower()
 
 
 def main(config: TrainConfig) -> None:
@@ -27,12 +39,19 @@ def main(config: TrainConfig) -> None:
 
     algo = config.algo
 
+    # Create a RunDir for this experiment
+    experiment_name = f"{config.env_id}_{_algo_name(algo)}"
+    run_dir = RunDir(experiment_name)
+    run_dir.save_config(config)
+    print(f"Run directory: {run_dir.root}")
+
     if isinstance(algo, PPOConfig):
         train_state, metrics = train_ppo(
             env,
             env_params,
             ppo_config=algo,
             runner_config=config.runner,
+            run_dir=run_dir,
         )
         final_loss = float(metrics.total_loss[-1])
         final_entropy = float(metrics.entropy[-1])
@@ -48,6 +67,7 @@ def main(config: TrainConfig) -> None:
             env_params,
             dqn_config=algo,
             runner_config=config.runner,
+            run_dir=run_dir,
         )
         n_episodes = len(result.episode_returns)
         last_returns = (
@@ -68,6 +88,7 @@ def main(config: TrainConfig) -> None:
             env_params,
             sac_config=algo,
             runner_config=config.runner,
+            run_dir=run_dir,
         )
         n_episodes = len(result.episode_returns)
         last_returns = (
@@ -84,6 +105,8 @@ def main(config: TrainConfig) -> None:
 
     else:
         raise TypeError(f"Unknown algorithm config type: {type(algo)}")
+
+    print(f"Metrics: {run_dir.log_path()}")
 
 
 if __name__ == "__main__":
