@@ -1,11 +1,11 @@
-"""Train DQN on CartPole (pure-JAX, functional API).
+"""Train SAC on Pendulum (pure-JAX, continuous control).
 
-Demonstrates the off-policy training loop: collect experience with
-epsilon-greedy, store in a replay buffer, and perform gradient updates.
+Demonstrates the off-policy training loop for SAC with a continuous
+action space. Uses the built-in Pendulum-v1 environment.
 
 Usage::
 
-    python examples/train_dqn_cartpole.py
+    python examples/train_sac_pendulum.py
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from vibe_rl.algorithms.dqn import DQN, DQNConfig
+from vibe_rl.algorithms.sac import SAC, SACConfig
 from vibe_rl.dataprotocol.replay_buffer import ReplayBuffer
 from vibe_rl.env import make
 from vibe_rl.env.wrappers import AutoResetWrapper
@@ -23,22 +23,25 @@ from vibe_rl.env.wrappers import AutoResetWrapper
 
 def main() -> None:
     seed = 42
-    total_steps = 100_000
-    eval_every = 10_000
+    total_steps = 50_000
+    eval_every = 5_000
     min_buffer_size = 1_000
 
-    config = DQNConfig(
-        hidden_sizes=(128, 128),
-        lr=1e-3,
+    config = SACConfig(
+        hidden_sizes=(256, 256),
+        actor_lr=3e-4,
+        critic_lr=3e-4,
+        alpha_lr=3e-4,
         gamma=0.99,
-        batch_size=64,
-        target_update_freq=1_000,
-        epsilon_start=1.0,
-        epsilon_end=0.01,
-        epsilon_decay_steps=20_000,
+        batch_size=256,
+        tau=0.005,
+        init_alpha=1.0,
+        autotune_alpha=True,
+        action_low=-2.0,
+        action_high=2.0,
     )
 
-    env, env_params = make("CartPole-v1")
+    env, env_params = make("Pendulum-v1")
     env = AutoResetWrapper(env)
     env_params = env.default_params()
 
@@ -46,12 +49,14 @@ def main() -> None:
     rng, env_key, agent_key = jax.random.split(rng, 3)
 
     obs, env_state = env.reset(env_key, env_params)
-    state = DQN.init(agent_key, obs_shape=(4,), n_actions=2, config=config)
+    state = SAC.init(agent_key, obs_shape=(3,), action_dim=1, config=config)
 
-    buffer = ReplayBuffer(capacity=50_000, obs_shape=(4,))
+    buffer = ReplayBuffer(
+        capacity=50_000, obs_shape=(3,), action_shape=(1,), action_dtype=np.float32,
+    )
 
     for step in range(total_steps):
-        action, state = DQN.act(state, obs, config=config, explore=True)
+        action, state = SAC.act(state, obs, config=config, explore=True)
 
         rng, step_key = jax.random.split(rng)
         next_obs, env_state, reward, done, info = env.step(
@@ -60,7 +65,7 @@ def main() -> None:
 
         buffer.push(
             obs=np.asarray(obs),
-            action=int(action),
+            action=np.asarray(action),
             reward=float(reward),
             next_obs=np.asarray(next_obs),
             done=float(done),
@@ -70,19 +75,15 @@ def main() -> None:
 
         if len(buffer) >= min_buffer_size:
             batch = buffer.sample(config.batch_size)
-            state, metrics = DQN.update(state, batch, config=config)
+            state, metrics = SAC.update(state, batch, config=config)
 
         if (step + 1) % eval_every == 0:
             eval_returns = _evaluate(state, env, env_params, config, rng)
             mean_return = float(jnp.mean(eval_returns))
-            eps = float(
-                config.epsilon_start
-                + jnp.clip(state.step / config.epsilon_decay_steps, 0.0, 1.0)
-                * (config.epsilon_end - config.epsilon_start)
-            )
+            alpha = float(jnp.exp(state.log_alpha))
             print(
                 f"Step {step + 1:6d} | "
-                f"epsilon={eps:.3f} | "
+                f"alpha={alpha:.3f} | "
                 f"eval_return={mean_return:.1f}"
             )
 
@@ -93,18 +94,18 @@ def _evaluate(
     state,
     env,
     env_params,
-    config: DQNConfig,
+    config: SACConfig,
     rng,
     n_episodes: int = 5,
 ) -> jax.Array:
-    """Run greedy evaluation episodes and return total returns."""
+    """Run deterministic evaluation episodes and return total returns."""
     returns = []
     for i in range(n_episodes):
         rng, eval_key = jax.random.split(rng)
         obs, env_state = env.reset(eval_key, env_params)
         episode_return = 0.0
-        for _ in range(500):
-            action, _ = DQN.act(state, obs, config=config, explore=False)
+        for _ in range(200):
+            action, _ = SAC.act(state, obs, config=config, explore=False)
             rng, step_key = jax.random.split(rng)
             obs, env_state, reward, done, _ = env.step(
                 step_key, env_state, action, env_params,

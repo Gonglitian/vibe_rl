@@ -35,7 +35,6 @@ def main() -> None:
         n_epochs=4,
     )
 
-    # Set up environment with auto-reset
     env, env_params = make("CartPole-v1")
     env = AutoResetWrapper(env)
     env_params = env.default_params()
@@ -43,24 +42,21 @@ def main() -> None:
     rng = jax.random.PRNGKey(seed)
     rng, env_key, agent_key = jax.random.split(rng, 3)
 
-    # Initialize
     obs, env_state = env.reset(env_key, env_params)
     state = PPO.init(agent_key, obs_shape=(4,), n_actions=2, config=config)
 
-    # Training loop
     for update in range(total_updates):
-        # Collect rollout
+        # Collect rollout (jax.lax.scan internally)
         state, trajectories, obs, env_state, last_value = PPO.collect_rollout(
             state, obs, env_state, env.step, env_params, config=config,
         )
 
-        # PPO update
+        # PPO update (multiple epochs of mini-batch SGD)
         state, metrics = PPO.update(
             state, trajectories, last_value, config=config,
         )
 
         if (update + 1) % 10 == 0:
-            # Quick eval: run a few episodes without exploration noise
             eval_returns = _evaluate(state, env, env_params, config, rng, n_episodes=5)
             mean_return = jnp.mean(eval_returns)
             print(
@@ -88,7 +84,7 @@ def _evaluate(
         obs, env_state = env.reset(eval_key, env_params)
         episode_return = 0.0
         for _ in range(500):
-            action, _, _, state_tmp = PPO.act(state, obs, config=config)
+            action, _, _, _ = PPO.act(state, obs, config=config)
             rng, step_key = jax.random.split(rng)
             obs, env_state, reward, done, _ = env.step(
                 step_key, env_state, action, env_params,

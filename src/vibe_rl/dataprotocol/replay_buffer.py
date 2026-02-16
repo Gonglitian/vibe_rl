@@ -33,13 +33,19 @@ class ReplayBuffer:
     Sampling returns a ``Transition`` of jax arrays, ready for jit.
     """
 
-    def __init__(self, capacity: int, obs_shape: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        obs_shape: tuple[int, ...],
+        action_shape: tuple[int, ...] = (),
+        action_dtype: np.dtype = np.int32,
+    ) -> None:
         self.capacity = capacity
         self._size = 0
         self._ptr = 0
 
         self._obs = np.zeros((capacity, *obs_shape), dtype=np.float32)
-        self._actions = np.zeros(capacity, dtype=np.int32)
+        self._actions = np.zeros((capacity, *action_shape), dtype=action_dtype)
         self._rewards = np.zeros(capacity, dtype=np.float32)
         self._next_obs = np.zeros((capacity, *obs_shape), dtype=np.float32)
         self._dones = np.zeros(capacity, dtype=np.bool_)
