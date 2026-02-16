@@ -25,7 +25,7 @@ from typing import Any
 import equinox as eqx
 import jax
 
-from vibe_rl.env.spaces import Box, Discrete
+from vibe_rl.env.spaces import Box, Discrete, Image
 
 
 class EnvState(eqx.Module):
@@ -90,7 +90,7 @@ class Environment(ABC):
         ...
 
     @abstractmethod
-    def observation_space(self, params: EnvParams) -> Box | Discrete:
+    def observation_space(self, params: EnvParams) -> Box | Discrete | Image:
         """Return the observation space (may depend on params)."""
         ...
 

@@ -82,6 +82,34 @@ class Box(eqx.Module):
         return jnp.float32
 
 
+class Image(eqx.Module):
+    """Image observation space: (height, width, channels) with uint8 pixels.
+
+    Values are integers in [0, 255]. Shape is always 3-D ``(H, W, C)``.
+    """
+
+    height: int = eqx.field(static=True)
+    width: int = eqx.field(static=True)
+    channels: int = eqx.field(static=True)
+
+    def sample(self, key: jax.Array) -> jax.Array:
+        return jax.random.randint(
+            key, shape=(self.height, self.width, self.channels), minval=0, maxval=256,
+        ).astype(jnp.uint8)
+
+    def contains(self, x: jax.Array) -> jax.Array:
+        shape_ok = x.shape == (self.height, self.width, self.channels)
+        return shape_ok & jnp.all((x >= 0) & (x <= 255))
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (self.height, self.width, self.channels)
+
+    @property
+    def dtype(self) -> jnp.dtype:
+        return jnp.uint8
+
+
 class MultiBinary(eqx.Module):
     """Space of binary vectors of length n."""
 
