@@ -53,6 +53,8 @@ from vibe_rl.algorithms.ppo.agent import PPO, PPOMetrics
 from vibe_rl.algorithms.ppo.config import PPOConfig
 from vibe_rl.algorithms.ppo.types import PPOState
 from vibe_rl.env.base import EnvParams, EnvState, Environment
+from vibe_rl.metrics import MetricsLogger
+from vibe_rl.run_dir import RunDir
 from vibe_rl.runner.config import RunnerConfig
 
 
@@ -87,6 +89,7 @@ def train_ppo(
     runner_config: RunnerConfig,
     obs_shape: tuple[int, ...] | None = None,
     n_actions: int | None = None,
+    run_dir: RunDir | None = None,
 ) -> tuple[PPOTrainState, PPOMetricsHistory]:
     """Train PPO from scratch using a single-JIT ``lax.scan`` loop.
 
@@ -104,6 +107,10 @@ def train_ppo(
         runner_config: Outer-loop settings (total_timesteps, seed, ...).
         obs_shape: Observation shape. Inferred from env if ``None``.
         n_actions: Number of discrete actions. Inferred from env if ``None``.
+        run_dir: Optional :class:`~vibe_rl.run_dir.RunDir` for JSONL
+            metrics logging.  Since PPO runs entirely inside
+            ``lax.scan``, metrics are batch-written after training
+            completes.
 
     Returns:
         ``(final_train_state, metrics_history)`` where *metrics_history*
@@ -121,7 +128,7 @@ def train_ppo(
     n_updates = runner_config.total_timesteps // steps_per_update
 
     if num_envs > 1:
-        return _train_ppo_vectorized(
+        train_state, history = _train_ppo_vectorized(
             env, env_params,
             ppo_config=ppo_config,
             obs_shape=obs_shape,
@@ -130,7 +137,7 @@ def train_ppo(
             seed=runner_config.seed,
         )
     else:
-        return _train_ppo_single(
+        train_state, history = _train_ppo_single(
             env, env_params,
             ppo_config=ppo_config,
             obs_shape=obs_shape,
@@ -138,6 +145,31 @@ def train_ppo(
             n_updates=n_updates,
             seed=runner_config.seed,
         )
+
+    # Batch-write metrics to JSONL after training (scan prevents I/O during)
+    if run_dir is not None:
+        _write_ppo_metrics(run_dir, history, steps_per_update)
+
+    return train_state, history
+
+
+def _write_ppo_metrics(
+    run_dir: RunDir,
+    history: PPOMetricsHistory,
+    steps_per_update: int,
+) -> None:
+    """Batch-write PPO metrics history to JSONL."""
+    with MetricsLogger(run_dir.log_path()) as logger:
+        n_updates = int(history.total_loss.shape[0])
+        for i in range(n_updates):
+            logger.write({
+                "step": (i + 1) * steps_per_update,
+                "total_loss": float(history.total_loss[i]),
+                "actor_loss": float(history.actor_loss[i]),
+                "critic_loss": float(history.critic_loss[i]),
+                "entropy": float(history.entropy[i]),
+                "approx_kl": float(history.approx_kl[i]),
+            })
 
 
 def _train_ppo_single(
