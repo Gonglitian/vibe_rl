@@ -16,10 +16,13 @@ Usage::
     restored = load_checkpoint(path, train_state)
 
     # Managed checkpointing during training
-    from vibe_rl.checkpoint import CheckpointManager
+    from vibe_rl.checkpoint import CheckpointManager, initialize_checkpoint_dir
 
-    with CheckpointManager(ckpt_dir, max_to_keep=5) as mgr:
-        for step in range(num_steps):
+    mgr, resuming = initialize_checkpoint_dir(
+        ckpt_dir, keep_period=500, overwrite=False, resume=True,
+    )
+    with mgr:
+        for step in range(start_step, num_steps):
             state = train_step(state)
             mgr.save(step, state)
         mgr.wait()
@@ -32,6 +35,8 @@ Requires the ``checkpoint`` optional dependency::
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -39,6 +44,8 @@ import equinox as eqx
 import jax
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lazy Orbax import — fails gracefully if not installed
@@ -231,6 +238,101 @@ def load_metadata(
 
 
 # ---------------------------------------------------------------------------
+# initialize_checkpoint_dir — openpi-style directory management
+# ---------------------------------------------------------------------------
+
+
+def initialize_checkpoint_dir(
+    directory: str | Path,
+    *,
+    keep_period: int | None = None,
+    overwrite: bool = False,
+    resume: bool = False,
+    max_to_keep: int = 1,
+    save_interval_steps: int = 1,
+    async_timeout_secs: int = 7200,
+    best_fn: Any | None = None,
+    best_mode: str = "min",
+) -> tuple[CheckpointManager, bool]:
+    """Initialize a checkpoint directory with resume/overwrite semantics.
+
+    Follows the openpi convention:
+
+    - Existing checkpoints + ``resume=True`` -> resume training.
+    - Existing checkpoints + no flag -> raise ``FileExistsError``.
+    - ``overwrite=True`` -> wipe the directory and start fresh.
+
+    Parameters
+    ----------
+    directory:
+        Root directory for checkpoints.
+    keep_period:
+        If set, permanently retain every checkpoint whose step is a
+        multiple of this value (never pruned by ``max_to_keep``).
+    overwrite:
+        If ``True``, delete existing checkpoints and start fresh.
+    resume:
+        If ``True``, allow resuming from existing checkpoints.
+    max_to_keep:
+        Number of recent checkpoints to retain.
+    save_interval_steps:
+        Only save when step is a multiple of this value.
+    async_timeout_secs:
+        Timeout for async checkpoint writes (default 7200s = 2 hours).
+    best_fn:
+        A function ``metrics -> scalar`` for best-model tracking.
+    best_mode:
+        ``'min'`` or ``'max'`` for best-model ranking.
+
+    Returns
+    -------
+    A ``(CheckpointManager, resuming)`` tuple.  ``resuming`` is ``True``
+    only when valid checkpoints were found and ``resume=True``.
+
+    Raises
+    ------
+    FileExistsError:
+        If checkpoints exist but neither ``resume`` nor ``overwrite`` is set.
+    """
+    d = Path(directory).resolve()
+    resuming = False
+
+    if d.exists() and any(d.iterdir()):
+        if overwrite:
+            shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+            logger.info("Wiped checkpoint directory %s", d)
+        elif resume:
+            resuming = True
+        else:
+            raise FileExistsError(
+                f"Checkpoint directory {d} already exists. "
+                f"Pass resume=True to continue training, or "
+                f"overwrite=True to start fresh."
+            )
+
+    mgr = CheckpointManager(
+        d,
+        max_to_keep=max_to_keep,
+        keep_period=keep_period,
+        save_interval_steps=save_interval_steps,
+        async_timeout_secs=async_timeout_secs,
+        best_fn=best_fn,
+        best_mode=best_mode,
+    )
+
+    # If the directory existed but has no real checkpoints, don't resume
+    if resuming and not mgr.all_steps():
+        logger.info(
+            "Checkpoint directory exists but contains no checkpoints; "
+            "starting fresh."
+        )
+        resuming = False
+
+    return mgr, resuming
+
+
+# ---------------------------------------------------------------------------
 # CheckpointManager — periodic + best-model checkpointing
 # ---------------------------------------------------------------------------
 
@@ -240,7 +342,8 @@ class CheckpointManager:
 
     Wraps Orbax's ``CheckpointManager`` with Equinox-friendly
     serialization.  Supports async checkpointing, max-to-keep
-    retention, and best-model tracking.
+    retention, ``keep_period`` for permanent snapshots, and best-model
+    tracking.
 
     Parameters
     ----------
@@ -248,10 +351,15 @@ class CheckpointManager:
         Root directory for all checkpoints.
     max_to_keep:
         Number of recent checkpoints to retain.
+    keep_period:
+        If set, permanently retain every checkpoint whose step is a
+        multiple of this value (e.g. ``keep_period=500`` keeps steps
+        500, 1000, 1500, ... forever).
     save_interval_steps:
         If set, only save when ``step`` is a multiple of this value.
-    async_checkpointing:
-        Whether to save asynchronously (default ``True``).
+    async_timeout_secs:
+        Timeout in seconds for async checkpoint writes.  Set to
+        ``None`` to disable async checkpointing entirely.
     best_fn:
         A function ``metrics -> scalar`` for best-model tracking.
     best_mode:
@@ -259,7 +367,7 @@ class CheckpointManager:
 
     Usage::
 
-        with CheckpointManager(ckpt_dir, max_to_keep=5) as mgr:
+        with CheckpointManager(ckpt_dir, max_to_keep=5, keep_period=500) as mgr:
             for step in range(num_steps):
                 state = train_step(state)
                 mgr.save(step, state, metrics={"loss": float(loss)})
@@ -271,8 +379,9 @@ class CheckpointManager:
         directory: str | Path,
         *,
         max_to_keep: int = 5,
+        keep_period: int | None = None,
         save_interval_steps: int = 1,
-        async_checkpointing: bool = True,
+        async_timeout_secs: int | None = 7200,
         best_fn: Any | None = None,
         best_mode: str = "min",
     ) -> None:
@@ -282,11 +391,18 @@ class CheckpointManager:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._save_interval = save_interval_steps
         self._max_to_keep = max_to_keep
+        self._keep_period = keep_period
+
+        # Build async options
+        async_options = None
+        if async_timeout_secs is not None:
+            async_options = ocp.AsyncOptions(timeout_secs=async_timeout_secs)
 
         options = ocp.CheckpointManagerOptions(
             save_interval_steps=save_interval_steps,
             max_to_keep=max_to_keep,
-            enable_async_checkpointing=async_checkpointing,
+            keep_period=keep_period,
+            async_options=async_options,
             best_fn=best_fn,
             best_mode=best_mode,
             keep_checkpoints_without_metrics=(best_fn is not None),
@@ -414,5 +530,6 @@ class CheckpointManager:
     def __repr__(self) -> str:
         return (
             f"CheckpointManager({self._directory}, "
-            f"max_to_keep={self._max_to_keep})"
+            f"max_to_keep={self._max_to_keep}, "
+            f"keep_period={self._keep_period})"
         )

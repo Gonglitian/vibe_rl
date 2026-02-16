@@ -64,6 +64,10 @@ class WandbBackend:
         W&B entity (user or team). ``None`` uses the default.
     config:
         Experiment config dict to log at init time.
+    checkpoint_dir:
+        If set, persist the WandB run ID to
+        ``<checkpoint_dir>/wandb_id.txt`` so that resumed training
+        continues the same WandB run (seamless curves).
     **init_kwargs:
         Extra keyword arguments passed to ``wandb.init()``.
     """
@@ -73,6 +77,7 @@ class WandbBackend:
         project: str = "vibe_rl",
         entity: str | None = None,
         config: dict[str, Any] | None = None,
+        checkpoint_dir: str | Path | None = None,
         **init_kwargs: Any,
     ) -> None:
         try:
@@ -83,9 +88,25 @@ class WandbBackend:
                 "Install it with: pip install wandb"
             ) from None
         self._wandb = wandb
+
+        # Resume from saved run ID if available
+        wandb_id_path = None
+        if checkpoint_dir is not None:
+            wandb_id_path = Path(checkpoint_dir) / "wandb_id.txt"
+            if wandb_id_path.exists():
+                saved_id = wandb_id_path.read_text().strip()
+                if saved_id:
+                    init_kwargs.setdefault("id", saved_id)
+                    init_kwargs.setdefault("resume", "must")
+
         self._run = wandb.init(
             project=project, entity=entity, config=config, **init_kwargs
         )
+
+        # Persist the run ID for future resumption
+        if wandb_id_path is not None:
+            wandb_id_path.parent.mkdir(parents=True, exist_ok=True)
+            wandb_id_path.write_text(self._run.id + "\n")
 
     def log(self, record: dict[str, Any], step: int | None = None) -> None:
         self._wandb.log(record, step=step)

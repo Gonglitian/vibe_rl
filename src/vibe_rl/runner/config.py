@@ -36,6 +36,10 @@ class RunnerConfig:
     # Seeding
     seed: int = 0
 
-    # Run management
-    resume: bool = False  # resume training from latest checkpoint
-    overwrite: bool = False  # overwrite existing run directory
+    # Checkpointing
+    checkpoint_dir: str | None = None  # None = no checkpointing
+    checkpoint_interval: int = 5_000  # save every N steps
+    max_checkpoints: int = 5  # recent checkpoints to retain
+    keep_period: int | None = None  # permanently keep every N steps
+    resume: bool = False  # resume from existing checkpoint
+    overwrite: bool = False  # wipe existing checkpoints
