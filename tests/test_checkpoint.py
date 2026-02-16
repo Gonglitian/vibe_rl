@@ -383,7 +383,7 @@ class TestWandbResume:
             from vibe_rl.metrics import WandbBackend
 
             backend = WandbBackend(
-                project="test", checkpoint_dir=str(ckpt_dir),
+                project="test", run_dir=str(ckpt_dir),
             )
 
             # Verify wandb_id.txt was written
@@ -413,7 +413,7 @@ class TestWandbResume:
             from vibe_rl.metrics import WandbBackend
 
             backend = WandbBackend(
-                project="test", checkpoint_dir=str(ckpt_dir),
+                project="test", run_dir=str(ckpt_dir),
             )
 
             # Verify wandb.init was called with id and resume
