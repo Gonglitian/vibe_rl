@@ -28,5 +28,9 @@ class RunnerConfig:
     buffer_size: int = 100_000
     warmup_steps: int = 1_000
 
+    # Multi-device (pmap)
+    num_devices: int | None = None  # auto-detect if None
+    num_envs: int = 1  # parallel envs per device
+
     # Seeding
     seed: int = 0
