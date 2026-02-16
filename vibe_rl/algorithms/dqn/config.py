@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class DQNConfig:
     """All DQN hyperparameters in one place."""
 
@@ -26,6 +26,3 @@ class DQNConfig:
     epsilon_start: float = 1.0
     epsilon_end: float = 0.01
     epsilon_decay_steps: int = 50_000
-
-    # Device
-    device: str = "cpu"

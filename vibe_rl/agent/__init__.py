@@ -1,3 +1,3 @@
-from vibe_rl.agent.base import BaseAgent
+from vibe_rl.agent.base import Agent
 
-__all__ = ["BaseAgent"]
+__all__ = ["Agent"]
