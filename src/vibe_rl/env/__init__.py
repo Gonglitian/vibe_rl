@@ -14,6 +14,7 @@ Quick start::
 from vibe_rl.env.base import Environment, EnvParams, EnvState
 from vibe_rl.env.cart_pole import CartPole, CartPoleParams, CartPoleState
 from vibe_rl.env.grid_world import GridWorld, GridWorldParams, GridWorldState
+from vibe_rl.env.pendulum import Pendulum, PendulumParams, PendulumState
 from vibe_rl.env.spaces import Box, Discrete, MultiBinary
 from vibe_rl.env.wrappers import (
     AutoResetWrapper,
@@ -27,6 +28,7 @@ from vibe_rl.env.wrappers import (
 _REGISTRY: dict[str, type[Environment]] = {
     "CartPole-v1": CartPole,
     "GridWorld-v0": GridWorld,
+    "Pendulum-v1": Pendulum,
 }
 
 
@@ -66,6 +68,9 @@ __all__ = [
     "GridWorld",
     "GridWorldParams",
     "GridWorldState",
+    "Pendulum",
+    "PendulumParams",
+    "PendulumState",
     # Wrappers
     "AutoResetWrapper",
     "RewardScaleWrapper",
