@@ -10,7 +10,12 @@ from vibe_rl.checkpoint import (
     save_eqx,
 )
 from vibe_rl.env import make
-from vibe_rl.metrics import MetricsLogger
+from vibe_rl.metrics import (
+    MetricsLogger,
+    log_step_progress,
+    resume_wandb,
+    setup_logging,
+)
 from vibe_rl.run_dir import RunDir
 from vibe_rl.schedule import linear_schedule
 from vibe_rl.seeding import fold_in, make_rng, split_key, split_keys
@@ -24,6 +29,9 @@ __all__ = [
     "Metrics",
     "MetricsLogger",
     "RunDir",
+    "log_step_progress",
+    "resume_wandb",
+    "setup_logging",
     "Transition",
     "VideoRecorder",
     "fold_in",
