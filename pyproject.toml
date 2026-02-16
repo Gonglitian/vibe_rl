@@ -26,13 +26,18 @@ envs = [
 checkpoint = [
     "orbax-checkpoint>=0.11",
 ]
+data = [
+    "lerobot>=0.1",
+    "datasets>=2.19",
+    "torch>=2.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.5",
     "ruff>=0.8",
 ]
 all = [
-    "vibe-rl[envs,checkpoint,dev]",
+    "vibe-rl[envs,checkpoint,data,dev]",
 ]
 
 [build-system]
