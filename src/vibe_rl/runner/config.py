@@ -31,6 +31,11 @@ class RunnerConfig:
     # Multi-device (pmap)
     num_devices: int | None = None  # auto-detect if None
     num_envs: int = 1  # parallel envs per device
+    fsdp_devices: int = 1  # number of FSDP-sharded devices
 
     # Seeding
     seed: int = 0
+
+    # Run management
+    resume: bool = False  # resume training from latest checkpoint
+    overwrite: bool = False  # overwrite existing run directory
