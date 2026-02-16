@@ -1,7 +1,7 @@
-"""Tests for multi-GPU training via jax.pmap.
+"""Tests for multi-GPU training via jit + NamedSharding (shard_map).
 
-Uses ``chex.fake_pmap()`` + XLA_FLAGS to simulate multiple devices on a
-single CPU, so tests can run anywhere without real GPUs.
+Uses XLA_FLAGS to simulate multiple devices on a single CPU, so tests
+can run anywhere without real GPUs.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-# Force 4 fake CPU devices for pmap tests.
+# Force 4 fake CPU devices for multi-GPU tests.
 # Must be set before any JAX operations.
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
 
@@ -114,7 +114,7 @@ class TestTrainPPOMultiGPU:
         assert isinstance(train_state, PPOTrainState)
         assert isinstance(history, PPOMetricsHistory)
 
-        # pmap outer axis is devices, scan inner axis is updates
+        # shard_map outer axis is devices, scan inner axis is updates
         # -> shape is (n_devices, n_updates)
         assert history.total_loss.shape == (2, n_updates)
         assert history.actor_loss.shape == (2, n_updates)
@@ -334,6 +334,49 @@ class TestTrainPPOMultiGPU:
 
 
 # ---------------------------------------------------------------------------
+# Sharding module tests
+# ---------------------------------------------------------------------------
+
+
+class TestShardingModule:
+    def test_make_mesh_default(self):
+        """Default mesh with fsdp_devices=1 creates a (n_devices, 1) mesh."""
+        from vibe_rl.sharding import make_mesh
+        mesh = make_mesh(num_fsdp_devices=1)
+        assert mesh.axis_names == ("batch", "fsdp")
+        n_devices = len(jax.devices())
+        assert mesh.shape == {"batch": n_devices, "fsdp": 1}
+
+    def test_make_mesh_fsdp(self):
+        """Mesh with fsdp_devices=2 splits devices across both axes."""
+        from vibe_rl.sharding import make_mesh
+        mesh = make_mesh(num_fsdp_devices=2)
+        assert mesh.axis_names == ("batch", "fsdp")
+        n_devices = len(jax.devices())
+        assert mesh.shape == {"batch": n_devices // 2, "fsdp": 2}
+
+    def test_make_mesh_invalid_fsdp(self):
+        """Should raise when fsdp_devices doesn't divide device count."""
+        from vibe_rl.sharding import make_mesh
+        with pytest.raises(ValueError, match="divisible"):
+            make_mesh(num_fsdp_devices=3)  # 4 devices not divisible by 3
+
+    def test_data_sharding(self):
+        """data_sharding produces a PartitionSpec with DATA_AXIS."""
+        from vibe_rl.sharding import data_sharding, make_mesh
+        mesh = make_mesh()
+        spec = data_sharding(mesh)
+        assert spec.spec == (("batch", "fsdp"),)
+
+    def test_replicate_sharding(self):
+        """replicate_sharding produces an empty PartitionSpec."""
+        from vibe_rl.sharding import make_mesh, replicate_sharding
+        mesh = make_mesh()
+        spec = replicate_sharding(mesh)
+        assert spec.spec == ()
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint with unreplicate/replicate tests
 # ---------------------------------------------------------------------------
 
@@ -444,10 +487,15 @@ class TestRunnerConfigMultiGPU:
         cfg = RunnerConfig()
         assert cfg.num_envs == 1
 
+    def test_default_fsdp_devices(self):
+        cfg = RunnerConfig()
+        assert cfg.fsdp_devices == 1
+
     def test_custom_values(self):
-        cfg = RunnerConfig(num_devices=4, num_envs=8)
+        cfg = RunnerConfig(num_devices=4, num_envs=8, fsdp_devices=2)
         assert cfg.num_devices == 4
         assert cfg.num_envs == 8
+        assert cfg.fsdp_devices == 2
 
     def test_frozen(self):
         cfg = RunnerConfig(num_devices=2)

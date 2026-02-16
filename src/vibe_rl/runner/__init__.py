@@ -18,6 +18,8 @@ from vibe_rl.runner.config import RunnerConfig
 from vibe_rl.runner.device_utils import (
     get_num_devices,
     replicate,
+    replicate_on_mesh,
+    shard_pytree,
     split_key_across_devices,
     unreplicate,
 )
@@ -33,6 +35,8 @@ __all__ = [
     # Device utilities
     "get_num_devices",
     "replicate",
+    "replicate_on_mesh",
+    "shard_pytree",
     "unreplicate",
     "split_key_across_devices",
     # Evaluator
@@ -43,7 +47,7 @@ __all__ = [
     "PPOTrainState",
     "PPOMetricsHistory",
     "train_ppo",
-    # PPO multi-GPU (pmap)
+    # PPO multi-GPU (jit + NamedSharding)
     "train_ppo_multigpu",
     # DQN (Hybrid)
     "DQNTrainResult",

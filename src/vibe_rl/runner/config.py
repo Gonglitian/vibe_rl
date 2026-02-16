@@ -28,10 +28,10 @@ class RunnerConfig:
     buffer_size: int = 100_000
     warmup_steps: int = 1_000
 
-    # Multi-device (pmap)
+    # Multi-device (jit + NamedSharding)
     num_devices: int | None = None  # auto-detect if None
     num_envs: int = 1  # parallel envs per device
-    fsdp_devices: int = 1  # number of FSDP-sharded devices
+    fsdp_devices: int = 1  # FSDP axis size (1 = pure data-parallel)
 
     # Seeding
     seed: int = 0
