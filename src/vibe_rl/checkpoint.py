@@ -120,6 +120,7 @@ def save_checkpoint(
     *,
     step: int | None = None,
     metadata: dict[str, Any] | None = None,
+    unreplicate: bool = False,
 ) -> Path:
     """Save a single checkpoint using Orbax.
 
@@ -136,11 +137,18 @@ def save_checkpoint(
         If given, creates a ``step_{step}/`` subdirectory.
     metadata:
         Optional dict of JSON-serializable metadata to save alongside.
+    unreplicate:
+        If ``True``, strip the leading device dimension (take the first
+        replica) before saving. Use this when saving pmap-replicated
+        state so the checkpoint is device-count agnostic.
 
     Returns
     -------
     Path to the checkpoint directory.
     """
+    if unreplicate:
+        pytree = jax.tree.map(lambda x: x[0], pytree)
+
     d = Path(directory)
     if step is not None:
         d = d / f"step_{step}"
@@ -164,6 +172,7 @@ def load_checkpoint(
     like: T,
     *,
     step: int | None = None,
+    replicate_to: int | None = None,
 ) -> T:
     """Load a checkpoint saved with :func:`save_checkpoint`.
 
@@ -175,6 +184,10 @@ def load_checkpoint(
         A pytree template with the same structure as the saved state.
     step:
         If given, load from ``step_{step}/`` subdirectory.
+    replicate_to:
+        If given, broadcast each leaf to ``(replicate_to, *shape)``
+        to prepare for pmap. Use this to restore a single-device
+        checkpoint into a multi-device training setup.
 
     Returns
     -------
@@ -185,7 +198,17 @@ def load_checkpoint(
         d = d / f"step_{step}"
 
     eqx_path = d / "state.eqx"
-    return eqx.tree_deserialise_leaves(str(eqx_path), like)
+    restored = eqx.tree_deserialise_leaves(str(eqx_path), like)
+
+    if replicate_to is not None:
+        import jax.numpy as jnp
+
+        restored = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (replicate_to, *x.shape)),
+            restored,
+        )
+
+    return restored
 
 
 def load_metadata(

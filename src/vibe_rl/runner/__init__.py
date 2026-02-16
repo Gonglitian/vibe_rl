@@ -15,14 +15,26 @@ policy across vmapped parallel episodes inside a single JIT call.
 """
 
 from vibe_rl.runner.config import RunnerConfig
+from vibe_rl.runner.device_utils import (
+    get_num_devices,
+    replicate,
+    split_key_across_devices,
+    unreplicate,
+)
 from vibe_rl.runner.evaluator import EvalMetrics, evaluate, jit_evaluate
 from vibe_rl.runner.train_dqn import DQNTrainResult, train_dqn
 from vibe_rl.runner.train_ppo import PPOMetricsHistory, PPOTrainState, train_ppo
+from vibe_rl.runner.train_ppo_multigpu import train_ppo_multigpu
 from vibe_rl.runner.train_sac import SACTrainResult, train_sac
 
 __all__ = [
     # Config
     "RunnerConfig",
+    # Device utilities
+    "get_num_devices",
+    "replicate",
+    "unreplicate",
+    "split_key_across_devices",
     # Evaluator
     "EvalMetrics",
     "evaluate",
@@ -31,6 +43,8 @@ __all__ = [
     "PPOTrainState",
     "PPOMetricsHistory",
     "train_ppo",
+    # PPO multi-GPU (pmap)
+    "train_ppo_multigpu",
     # DQN (Hybrid)
     "DQNTrainResult",
     "train_dqn",
