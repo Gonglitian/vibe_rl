@@ -108,6 +108,22 @@ def main(config: TrainConfig) -> None:
 
     print(f"Metrics: {run_dir.log_path()}")
 
+    # Auto-plot reward curve
+    if config.runner.plot:
+        try:
+            from vibe_rl.plotting import plot_reward_curve
+            import matplotlib.pyplot as plt
+
+            save_path = run_dir.artifact_path("reward_curve.png")
+            fig = plot_reward_curve(run_dir.root, save_path=save_path)
+            plt.close(fig)
+            print(f"Reward curve: {save_path}")
+        except ImportError:
+            print(
+                "Skipping auto-plot (matplotlib not installed). "
+                "Install with: pip install 'vibe-rl[plotting]'"
+            )
+
 
 if __name__ == "__main__":
     main(cli())

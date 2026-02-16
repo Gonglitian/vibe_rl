@@ -43,3 +43,6 @@ class RunnerConfig:
     keep_period: int | None = None  # permanently keep every N steps
     resume: bool = False  # resume from existing checkpoint
     overwrite: bool = False  # wipe existing checkpoints
+
+    # Auto-plotting
+    plot: bool = True  # generate reward curve after training
