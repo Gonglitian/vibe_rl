@@ -1,18 +1,19 @@
-"""Multi-GPU PPO training via ``jax.pmap``.
+"""Multi-GPU PPO training via ``jax.jit`` + ``NamedSharding``.
 
-Data-parallel PPO across multiple devices. Gradients are averaged
-across devices via ``jax.lax.pmean`` on the ``pmap`` axis. Within each
-device, the loss already averages over the minibatch (which includes
-samples from all vmapped environments), so no separate within-device
-pmean is needed.
+Data-parallel PPO across multiple devices using JAX's SPMD
+partitioning with ``shard_map`` for explicit per-device code.
+Data (env states, observations, RNG keys) is sharded across devices
+via ``NamedSharding`` on a 2-D mesh ``(batch, fsdp)``.  Model
+parameters are replicated.  Gradients are averaged across devices
+via ``jax.lax.pmean`` inside the ``shard_map`` context.
 
 The data shape convention is::
 
     (n_devices, num_envs, *feature_dims)
 
-Each device runs ``num_envs`` parallel environments. The ``pmap`` outer
-axis distributes across devices, and inside each device ``vmap``
-vectorises across environments.
+Each device runs ``num_envs`` parallel environments. The sharded
+outer axis distributes across devices, and inside each device
+``vmap`` vectorises across environments.
 
 Single-GPU / multi-GPU switching is config-driven — set
 ``RunnerConfig(num_devices=1)`` (or ``None`` for auto-detect) to
@@ -46,6 +47,8 @@ import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from vibe_rl.algorithms.ppo.agent import PPO, PPOMetrics, compute_gae
 from vibe_rl.algorithms.ppo.config import PPOConfig
@@ -61,6 +64,7 @@ from vibe_rl.runner.device_utils import (
     unreplicate,
 )
 from vibe_rl.runner.train_ppo import PPOMetricsHistory, PPOTrainState
+from vibe_rl.sharding import BATCH_AXIS, make_mesh
 
 
 def train_ppo_multigpu(
@@ -72,15 +76,16 @@ def train_ppo_multigpu(
     obs_shape: tuple[int, ...] | None = None,
     n_actions: int | None = None,
 ) -> tuple[PPOTrainState, PPOMetricsHistory]:
-    """Train PPO with data-parallel ``pmap`` across multiple devices.
+    """Train PPO with data-parallel ``jit`` + ``NamedSharding`` across devices.
 
     The environment **must** be wrapped with ``AutoResetWrapper`` (or
     equivalent) so that episodes auto-reset inside the scan.
 
     Data is shaped as ``(n_devices, num_envs, *feature_dims)``. Gradients
-    are synchronised across devices via ``lax.pmean(grads, axis_name="device")``.
-    Within each device, the minibatch loss already averages over all samples
-    (including those from different vmapped environments).
+    are synchronised across devices via ``lax.pmean`` inside a
+    ``shard_map`` context.  Within each device, the minibatch loss
+    already averages over all samples (including those from different
+    vmapped environments).
 
     Args:
         env: Pure-JAX environment (must auto-reset on done).
@@ -94,7 +99,7 @@ def train_ppo_multigpu(
         ``(final_train_state, metrics_history)`` where *final_train_state*
         has the leading device dimension (use ``unreplicate`` to get a
         single copy), and *metrics_history* fields have shape
-        ``(n_updates, n_devices)``.
+        ``(n_devices, n_updates)``.
     """
     if obs_shape is None:
         obs_space = env.observation_space(env_params)
@@ -121,6 +126,14 @@ def train_ppo_multigpu(
     obs_dim = math.prod(obs_shape)
 
     # ------------------------------------------------------------------
+    # Create mesh
+    # ------------------------------------------------------------------
+    mesh = make_mesh(
+        num_fsdp_devices=runner_config.fsdp_devices,
+        num_devices=n_devices,
+    )
+
+    # ------------------------------------------------------------------
     # Build the per-device learner function
     # ------------------------------------------------------------------
 
@@ -133,10 +146,16 @@ def train_ppo_multigpu(
     ) -> tuple[PPOTrainState, PPOMetrics]:
         """Single-device learner: init + scan over updates.
 
-        This function is pmapped over the device axis.
+        This function is mapped over the device axis via shard_map.
         ``shared_agent_key`` is the same on every device so that
         initial params are identical (required for pmean sync).
+
+        Note: shard_map preserves rank (unlike pmap which removes the
+        mapped axis). The device_rng arrives as shape (1, 2), so we
+        squeeze out the leading shard dimension.
         """
+        # shard_map slices but preserves rank: (1, 2) -> squeeze to (2,)
+        device_rng = device_rng.squeeze(axis=0)
         rng, env_key = jax.random.split(device_rng)
 
         # Initialise agent — shared_agent_key is identical across devices
@@ -202,7 +221,7 @@ def train_ppo_multigpu(
 
             return agent_state, trajectories, final_obs, final_env_states, last_values
 
-        def _update_with_pmean(
+        def _update_step(
             state: PPOState,
             trajectories: PPOTransition,
             last_value: chex.Array,
@@ -294,8 +313,8 @@ def train_ppo_multigpu(
                         eqx.filter_value_and_grad(loss_fn, has_aux=True)(params)
                     )
 
-                    # Average gradients across devices (pmap axis)
-                    grads = jax.lax.pmean(grads, axis_name="device")
+                    # Average gradients across devices (shard_map axis)
+                    grads = jax.lax.pmean(grads, axis_name=BATCH_AXIS)
 
                     updates, new_opt_state = optimizer.update(
                         grads, opt_state, eqx.filter(params, eqx.is_array),
@@ -350,7 +369,7 @@ def train_ppo_multigpu(
                 )
             )
 
-            agent_state, metrics = _update_with_pmean(
+            agent_state, metrics = _update_step(
                 agent_state, trajectories, last_value,
             )
 
@@ -373,26 +392,38 @@ def train_ppo_multigpu(
             entropy=metrics_history.entropy,
             approx_kl=metrics_history.approx_kl,
         )
+
+        # shard_map preserves rank: add leading shard dim so concatenation
+        # across devices produces shape (n_devices, ...).
+        final_state = jax.tree.map(lambda x: x[None, ...], final_state)
+        history = jax.tree.map(lambda x: x[None, ...], history)
+
         return final_state, history
 
     # ------------------------------------------------------------------
-    # pmap the learner across devices
+    # shard_map the learner across devices (replaces pmap)
     # ------------------------------------------------------------------
-    pmapped_learner = jax.pmap(
+    # device_keys: sharded across batch axis (each device gets its own key)
+    # shared_agent_key: replicated (same on all devices, P() = no sharding)
+    sharded_learner = jax.shard_map(
         partial(
             _learner_fn,
             _ppo_config=ppo_config,
             _n_updates=n_updates,
             _num_envs=num_envs,
         ),
-        axis_name="device",
-        # shared_agent_key is broadcast (not sharded) across devices
-        in_axes=(0, None),
+        mesh=mesh,
+        in_specs=(P(BATCH_AXIS), P()),
+        out_specs=(P(BATCH_AXIS), P(BATCH_AXIS)),
+        check_vma=False,
     )
+
+    # Wrap in jit for compilation
+    jitted_learner = jax.jit(sharded_learner)
 
     # Split RNG: shared agent key (same on all devices) + per-device keys
     rng = jax.random.PRNGKey(runner_config.seed)
     rng, agent_key = jax.random.split(rng)
     device_keys = split_key_across_devices(rng, n_devices)
 
-    return pmapped_learner(device_keys, agent_key)
+    return jitted_learner(device_keys, agent_key)

@@ -146,8 +146,8 @@ def save_checkpoint(
         Optional dict of JSON-serializable metadata to save alongside.
     unreplicate:
         If ``True``, strip the leading device dimension (take the first
-        replica) before saving. Use this when saving pmap-replicated
-        state so the checkpoint is device-count agnostic.
+        replica) before saving. Use this when saving replicated state
+        so the checkpoint is device-count agnostic.
 
     Returns
     -------
@@ -193,7 +193,7 @@ def load_checkpoint(
         If given, load from ``step_{step}/`` subdirectory.
     replicate_to:
         If given, broadcast each leaf to ``(replicate_to, *shape)``
-        to prepare for pmap. Use this to restore a single-device
+        for multi-device training. Use this to restore a single-device
         checkpoint into a multi-device training setup.
 
     Returns

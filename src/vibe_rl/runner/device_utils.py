@@ -1,7 +1,8 @@
-"""Multi-device utilities for pmap-based data-parallel training.
+"""Multi-device utilities for sharding-based data-parallel training.
 
 Provides helpers for replicating state across devices and unreplicating
-back to a single copy (e.g. for checkpointing or evaluation).
+back to a single copy (e.g. for checkpointing or evaluation).  Works
+with both the new ``jit`` + ``NamedSharding`` approach and plain pytrees.
 
 Usage::
 
@@ -16,10 +17,12 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 
 def get_num_devices(requested: int | None = None) -> int:
-    """Return the number of devices to use for pmap.
+    """Return the number of devices to use.
 
     Args:
         requested: Explicit device count. If ``None``, returns the
@@ -60,7 +63,7 @@ def replicate(pytree, n_devices: int):
 
 
 def unreplicate(pytree):
-    """Take the first replica from a pmap-replicated pytree.
+    """Take the first replica from a replicated pytree.
 
     Inverse of :func:`replicate` — removes the leading device dimension
     by taking ``tree[0]``.
@@ -85,3 +88,38 @@ def split_key_across_devices(rng, n_devices: int):
         Array of shape ``(n_devices, 2)`` — one key per device.
     """
     return jax.random.split(rng, n_devices)
+
+
+def shard_pytree(pytree, mesh: Mesh):
+    """Place a pytree on devices with data-sharding on the leading axis.
+
+    The leading dimension of each leaf is split across the mesh's data
+    axes ``("batch", "fsdp")``.  Use this for batched data (observations,
+    actions, etc.) that should be distributed across devices.
+
+    Args:
+        pytree: A pytree whose leaves have a leading batch dimension.
+        mesh: The device mesh.
+
+    Returns:
+        Pytree with each leaf sharded across the mesh.
+    """
+    sharding = NamedSharding(mesh, PartitionSpec(("batch", "fsdp")))
+    return jax.tree.map(lambda x: jax.device_put(x, sharding), pytree)
+
+
+def replicate_on_mesh(pytree, mesh: Mesh):
+    """Replicate a pytree across all devices in a mesh.
+
+    Every device gets a full copy. Use this for model parameters and
+    optimizer state.
+
+    Args:
+        pytree: Any JAX pytree.
+        mesh: The device mesh.
+
+    Returns:
+        Pytree with each leaf replicated across the mesh.
+    """
+    sharding = NamedSharding(mesh, PartitionSpec())
+    return jax.tree.map(lambda x: jax.device_put(x, sharding), pytree)
