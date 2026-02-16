@@ -1,7 +1,14 @@
 """vibe_rl — Reinforcement Learning with JAX."""
 
 from vibe_rl.agent.base import Agent
-from vibe_rl.checkpoint import load_checkpoint, load_eqx, save_checkpoint, save_eqx
+from vibe_rl.checkpoint import (
+    CheckpointManager,
+    initialize_checkpoint_dir,
+    load_checkpoint,
+    load_eqx,
+    save_checkpoint,
+    save_eqx,
+)
 from vibe_rl.env import make
 from vibe_rl.metrics import MetricsLogger
 from vibe_rl.run_dir import RunDir
@@ -13,12 +20,14 @@ from vibe_rl.video import VideoRecorder
 __all__ = [
     "Agent",
     "AgentState",
+    "CheckpointManager",
     "Metrics",
     "MetricsLogger",
     "RunDir",
     "Transition",
     "VideoRecorder",
     "fold_in",
+    "initialize_checkpoint_dir",
     "linear_schedule",
     "load_checkpoint",
     "load_eqx",

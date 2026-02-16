@@ -9,8 +9,11 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 
 from vibe_rl.checkpoint import (
+    CheckpointManager,
+    initialize_checkpoint_dir,
     load_checkpoint,
     load_eqx,
     load_metadata,
@@ -179,6 +182,303 @@ class TestSaveLoadCheckpoint:
 
         x = jnp.ones(4)
         assert jnp.allclose(model(x), restored(x))
+
+
+# ---------------------------------------------------------------------------
+# CheckpointManager enhanced features
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointManagerKeepPeriod:
+    """Test keep_period parameter for permanent checkpoint retention."""
+
+    def test_keep_period_repr(self, tmp_path: Path) -> None:
+        mgr = CheckpointManager(
+            tmp_path / "ckpts",
+            max_to_keep=2,
+            keep_period=500,
+            async_timeout_secs=None,
+        )
+        assert "keep_period=500" in repr(mgr)
+        mgr.close()
+
+    def test_manager_with_keep_period(self, tmp_path: Path) -> None:
+        """CheckpointManager accepts keep_period without error."""
+        ckpt_dir = tmp_path / "ckpts"
+        with CheckpointManager(
+            ckpt_dir,
+            max_to_keep=2,
+            keep_period=5,
+            save_interval_steps=1,
+            async_timeout_secs=None,
+        ) as mgr:
+            state = _make_state()
+            for step in range(1, 11):
+                mgr.save(step, state)
+            mgr.wait()
+
+            steps = mgr.all_steps()
+            # keep_period=5 should retain steps 5 and 10
+            assert 5 in steps
+            assert 10 in steps
+
+    def test_manager_async_timeout(self, tmp_path: Path) -> None:
+        """CheckpointManager accepts async_timeout_secs."""
+        ckpt_dir = tmp_path / "ckpts"
+        with CheckpointManager(
+            ckpt_dir,
+            max_to_keep=2,
+            async_timeout_secs=3600,
+        ) as mgr:
+            state = _make_state()
+            mgr.save(1, state)
+            mgr.wait()
+            assert mgr.latest_step() == 1
+
+    def test_manager_no_async(self, tmp_path: Path) -> None:
+        """async_timeout_secs=None disables async."""
+        ckpt_dir = tmp_path / "ckpts"
+        with CheckpointManager(
+            ckpt_dir,
+            max_to_keep=2,
+            async_timeout_secs=None,
+        ) as mgr:
+            state = _make_state()
+            mgr.save(1, state)
+            assert mgr.latest_step() == 1
+
+
+# ---------------------------------------------------------------------------
+# initialize_checkpoint_dir tests
+# ---------------------------------------------------------------------------
+
+
+class TestInitializeCheckpointDir:
+    def test_fresh_start(self, tmp_path: Path) -> None:
+        """Empty directory: creates manager, resuming=False."""
+        ckpt_dir = tmp_path / "ckpts"
+        mgr, resuming = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=None, overwrite=False, resume=False,
+            async_timeout_secs=None,
+        )
+        assert resuming is False
+        assert ckpt_dir.exists()
+        mgr.close()
+
+    def test_resume_with_checkpoints(self, tmp_path: Path) -> None:
+        """Existing checkpoints + resume=True returns resuming=True."""
+        ckpt_dir = tmp_path / "ckpts"
+        # Pre-populate a checkpoint
+        with CheckpointManager(ckpt_dir, async_timeout_secs=None) as mgr:
+            state = _make_state()
+            mgr.save(100, state)
+            mgr.wait()
+
+        mgr2, resuming = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=None, overwrite=False, resume=True,
+            async_timeout_secs=None,
+        )
+        assert resuming is True
+        assert mgr2.latest_step() == 100
+        mgr2.close()
+
+    def test_resume_empty_dir_no_checkpoints(self, tmp_path: Path) -> None:
+        """Directory exists but no checkpoints: resuming=False."""
+        ckpt_dir = tmp_path / "ckpts"
+        ckpt_dir.mkdir(parents=True)
+        # Create a dummy file so directory is non-empty
+        (ckpt_dir / "dummy.txt").write_text("test")
+
+        mgr, resuming = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=None, overwrite=False, resume=True,
+            async_timeout_secs=None,
+        )
+        assert resuming is False
+        mgr.close()
+
+    def test_overwrite_clears_directory(self, tmp_path: Path) -> None:
+        """overwrite=True wipes existing checkpoints."""
+        ckpt_dir = tmp_path / "ckpts"
+        with CheckpointManager(ckpt_dir, async_timeout_secs=None) as mgr:
+            state = _make_state()
+            mgr.save(100, state)
+            mgr.wait()
+
+        mgr2, resuming = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=None, overwrite=True, resume=False,
+            async_timeout_secs=None,
+        )
+        assert resuming is False
+        assert mgr2.latest_step() is None
+        mgr2.close()
+
+    def test_existing_dir_no_flags_raises(self, tmp_path: Path) -> None:
+        """Existing checkpoints + neither resume nor overwrite -> error."""
+        ckpt_dir = tmp_path / "ckpts"
+        with CheckpointManager(ckpt_dir, async_timeout_secs=None) as mgr:
+            state = _make_state()
+            mgr.save(100, state)
+            mgr.wait()
+
+        with pytest.raises(FileExistsError, match="already exists"):
+            initialize_checkpoint_dir(
+                ckpt_dir, keep_period=None, overwrite=False, resume=False,
+                async_timeout_secs=None,
+            )
+
+    def test_resume_restores_state(self, tmp_path: Path) -> None:
+        """Full save-then-restore roundtrip via initialize_checkpoint_dir."""
+        ckpt_dir = tmp_path / "ckpts"
+        state = _make_state()
+
+        # Save
+        with CheckpointManager(ckpt_dir, async_timeout_secs=None) as mgr:
+            mgr.save(1000, state)
+            mgr.wait()
+
+        # Resume
+        mgr2, resuming = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=None, overwrite=False, resume=True,
+            async_timeout_secs=None,
+        )
+        assert resuming is True
+
+        template = _make_state()
+        restored = mgr2.restore(None, template)
+        assert int(restored.step) == 100  # step from the SimpleState content
+        assert jnp.array_equal(restored.weights, state.weights)
+        mgr2.close()
+
+    def test_keep_period_passed_through(self, tmp_path: Path) -> None:
+        """keep_period is forwarded to CheckpointManager."""
+        ckpt_dir = tmp_path / "ckpts"
+        mgr, _ = initialize_checkpoint_dir(
+            ckpt_dir, keep_period=500, overwrite=False, resume=False,
+            async_timeout_secs=None,
+        )
+        assert "keep_period=500" in repr(mgr)
+        mgr.close()
+
+
+# ---------------------------------------------------------------------------
+# WandB resume (wandb_id.txt) tests
+# ---------------------------------------------------------------------------
+
+
+class TestWandbResume:
+    def test_wandb_id_file_written(self, tmp_path: Path) -> None:
+        """WandbBackend writes wandb_id.txt to checkpoint_dir."""
+        from unittest.mock import MagicMock, patch
+
+        ckpt_dir = tmp_path / "ckpts"
+        ckpt_dir.mkdir(parents=True)
+
+        mock_run = MagicMock()
+        mock_run.id = "test_run_abc123"
+
+        mock_wandb = MagicMock()
+        mock_wandb.init.return_value = mock_run
+
+        with patch.dict("sys.modules", {"wandb": mock_wandb}):
+            from vibe_rl.metrics import WandbBackend
+
+            backend = WandbBackend(
+                project="test", checkpoint_dir=str(ckpt_dir),
+            )
+
+            # Verify wandb_id.txt was written
+            id_path = ckpt_dir / "wandb_id.txt"
+            assert id_path.exists()
+            assert id_path.read_text().strip() == "test_run_abc123"
+
+            backend.close()
+
+    def test_wandb_resume_reads_existing_id(self, tmp_path: Path) -> None:
+        """WandbBackend reads existing wandb_id.txt and passes id+resume."""
+        from unittest.mock import MagicMock, patch
+
+        ckpt_dir = tmp_path / "ckpts"
+        ckpt_dir.mkdir(parents=True)
+
+        # Pre-write a wandb ID
+        (ckpt_dir / "wandb_id.txt").write_text("previous_run_xyz\n")
+
+        mock_run = MagicMock()
+        mock_run.id = "previous_run_xyz"
+
+        mock_wandb = MagicMock()
+        mock_wandb.init.return_value = mock_run
+
+        with patch.dict("sys.modules", {"wandb": mock_wandb}):
+            from vibe_rl.metrics import WandbBackend
+
+            backend = WandbBackend(
+                project="test", checkpoint_dir=str(ckpt_dir),
+            )
+
+            # Verify wandb.init was called with id and resume
+            call_kwargs = mock_wandb.init.call_args[1]
+            assert call_kwargs["id"] == "previous_run_xyz"
+            assert call_kwargs["resume"] == "must"
+
+            backend.close()
+
+    def test_wandb_no_checkpoint_dir(self, tmp_path: Path) -> None:
+        """WandbBackend works normally when checkpoint_dir is None."""
+        from unittest.mock import MagicMock, patch
+
+        mock_run = MagicMock()
+        mock_run.id = "new_run_id"
+
+        mock_wandb = MagicMock()
+        mock_wandb.init.return_value = mock_run
+
+        with patch.dict("sys.modules", {"wandb": mock_wandb}):
+            from vibe_rl.metrics import WandbBackend
+
+            backend = WandbBackend(project="test")
+
+            # Should not have id or resume in kwargs
+            call_kwargs = mock_wandb.init.call_args[1]
+            assert "id" not in call_kwargs
+            assert "resume" not in call_kwargs
+
+            backend.close()
+
+
+# ---------------------------------------------------------------------------
+# RunnerConfig checkpoint fields test
+# ---------------------------------------------------------------------------
+
+
+class TestRunnerConfigCheckpointFields:
+    def test_default_values(self) -> None:
+        from vibe_rl.runner.config import RunnerConfig
+
+        cfg = RunnerConfig()
+        assert cfg.checkpoint_dir is None
+        assert cfg.checkpoint_interval == 5_000
+        assert cfg.max_checkpoints == 5
+        assert cfg.keep_period is None
+        assert cfg.resume is False
+        assert cfg.overwrite is False
+
+    def test_custom_values(self) -> None:
+        from vibe_rl.runner.config import RunnerConfig
+
+        cfg = RunnerConfig(
+            checkpoint_dir="/tmp/ckpts",
+            checkpoint_interval=1_000,
+            max_checkpoints=3,
+            keep_period=500,
+            resume=True,
+            overwrite=False,
+        )
+        assert cfg.checkpoint_dir == "/tmp/ckpts"
+        assert cfg.checkpoint_interval == 1_000
+        assert cfg.max_checkpoints == 3
+        assert cfg.keep_period == 500
+        assert cfg.resume is True
 
 
 # ---------------------------------------------------------------------------

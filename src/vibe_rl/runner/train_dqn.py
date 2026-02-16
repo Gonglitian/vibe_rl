@@ -29,6 +29,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from functools import partial
 from typing import NamedTuple
 
@@ -42,6 +43,8 @@ from vibe_rl.algorithms.dqn.types import DQNState
 from vibe_rl.dataprotocol.replay_buffer import ReplayBuffer
 from vibe_rl.env.base import EnvParams, EnvState, Environment
 from vibe_rl.runner.config import RunnerConfig
+
+logger = logging.getLogger(__name__)
 
 
 class _StepCarry(NamedTuple):
@@ -97,6 +100,10 @@ def train_dqn(
 
     The replay buffer lives in Python (numpy); everything else is jitted.
 
+    Supports checkpoint-based resume: when ``runner_config.resume`` is
+    ``True`` and a checkpoint exists at ``runner_config.checkpoint_dir``,
+    training resumes from the saved step with restored optimizer state.
+
     Args:
         env: Pure-JAX environment (should auto-reset on done).
         env_params: Environment parameters.
@@ -125,41 +132,72 @@ def train_dqn(
     obs, env_state = env.reset(env_key, env_params)
     buffer = ReplayBuffer(capacity=runner_config.buffer_size, obs_shape=obs_shape)
 
+    # --- Checkpoint setup ---
+    ckpt_mgr = None
+    start_step = 1
+
+    if runner_config.checkpoint_dir is not None:
+        from vibe_rl.checkpoint import initialize_checkpoint_dir
+
+        ckpt_mgr, resuming = initialize_checkpoint_dir(
+            runner_config.checkpoint_dir,
+            keep_period=runner_config.keep_period,
+            overwrite=runner_config.overwrite,
+            resume=runner_config.resume,
+            max_to_keep=runner_config.max_checkpoints,
+            save_interval_steps=runner_config.checkpoint_interval,
+        )
+
+        if resuming:
+            restored_step = ckpt_mgr.latest_step()
+            agent_state = ckpt_mgr.restore(restored_step, agent_state)
+            start_step = restored_step + 1
+            logger.info("Resumed DQN training from step %d", restored_step)
+
     episode_returns: list[float] = []
     metrics_log: list[dict[str, float]] = []
     ep_return = 0.0
 
-    for step in range(1, runner_config.total_timesteps + 1):
-        agent_state, next_obs, env_state, action, reward, done = _act_and_step(
-            agent_state, obs, env_state, env.step, env_params, config=dqn_config,
-        )
-
-        # Push to replay buffer (transfers to numpy)
-        buffer.push(obs, int(action), float(reward), next_obs, bool(done))
-        ep_return += float(reward)
-        obs = next_obs
-
-        if done:
-            episode_returns.append(ep_return)
-            ep_return = 0.0
-
-        # Train once buffer has enough data
-        if len(buffer) >= runner_config.warmup_steps:
-            batch = buffer.sample(dqn_config.batch_size)
-            agent_state, metrics = DQN.update(
-                agent_state, batch, config=dqn_config,
+    try:
+        for step in range(start_step, runner_config.total_timesteps + 1):
+            agent_state, next_obs, env_state, action, reward, done = _act_and_step(
+                agent_state, obs, env_state, env.step, env_params, config=dqn_config,
             )
 
-            if step % runner_config.log_interval == 0:
-                record = {
-                    "step": step,
-                    "loss": float(metrics.loss),
-                    "q_mean": float(metrics.q_mean),
-                    "epsilon": float(metrics.epsilon),
-                }
-                metrics_log.append(record)
-                if callback is not None:
-                    callback(step, agent_state, record)
+            # Push to replay buffer (transfers to numpy)
+            buffer.push(obs, int(action), float(reward), next_obs, bool(done))
+            ep_return += float(reward)
+            obs = next_obs
+
+            if done:
+                episode_returns.append(ep_return)
+                ep_return = 0.0
+
+            # Train once buffer has enough data
+            if len(buffer) >= runner_config.warmup_steps:
+                batch = buffer.sample(dqn_config.batch_size)
+                agent_state, metrics = DQN.update(
+                    agent_state, batch, config=dqn_config,
+                )
+
+                if step % runner_config.log_interval == 0:
+                    record = {
+                        "step": step,
+                        "loss": float(metrics.loss),
+                        "q_mean": float(metrics.q_mean),
+                        "epsilon": float(metrics.epsilon),
+                    }
+                    metrics_log.append(record)
+                    if callback is not None:
+                        callback(step, agent_state, record)
+
+            # Periodic checkpointing
+            if ckpt_mgr is not None:
+                ckpt_mgr.save(step, agent_state)
+    finally:
+        if ckpt_mgr is not None:
+            ckpt_mgr.wait()
+            ckpt_mgr.close()
 
     return DQNTrainResult(
         agent_state=agent_state,

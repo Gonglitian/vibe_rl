@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from functools import partial
 from typing import NamedTuple
 
@@ -39,6 +40,8 @@ from vibe_rl.algorithms.sac.types import SACState
 from vibe_rl.env.base import EnvParams, EnvState, Environment
 from vibe_rl.runner.config import RunnerConfig
 from vibe_rl.types import Transition
+
+logger = logging.getLogger(__name__)
 
 
 class _ContinuousReplayBuffer:
@@ -131,6 +134,10 @@ def train_sac(
 ) -> SACTrainResult:
     """Train SAC with a hybrid Python/JAX loop.
 
+    Supports checkpoint-based resume: when ``runner_config.resume`` is
+    ``True`` and a checkpoint exists at ``runner_config.checkpoint_dir``,
+    training resumes from the saved step with restored optimizer state.
+
     Args:
         env: Pure-JAX environment (should auto-reset on done).
         env_params: Environment parameters.
@@ -162,44 +169,75 @@ def train_sac(
         action_dim=action_dim,
     )
 
+    # --- Checkpoint setup ---
+    ckpt_mgr = None
+    start_step = 1
+
+    if runner_config.checkpoint_dir is not None:
+        from vibe_rl.checkpoint import initialize_checkpoint_dir
+
+        ckpt_mgr, resuming = initialize_checkpoint_dir(
+            runner_config.checkpoint_dir,
+            keep_period=runner_config.keep_period,
+            overwrite=runner_config.overwrite,
+            resume=runner_config.resume,
+            max_to_keep=runner_config.max_checkpoints,
+            save_interval_steps=runner_config.checkpoint_interval,
+        )
+
+        if resuming:
+            restored_step = ckpt_mgr.latest_step()
+            agent_state = ckpt_mgr.restore(restored_step, agent_state)
+            start_step = restored_step + 1
+            logger.info("Resumed SAC training from step %d", restored_step)
+
     episode_returns: list[float] = []
     metrics_log: list[dict[str, float]] = []
     ep_return = 0.0
 
-    for step in range(1, runner_config.total_timesteps + 1):
-        agent_state, next_obs, env_state, action, reward, done = _act_and_step(
-            agent_state, obs, env_state, env.step, env_params, config=sac_config,
-        )
-
-        buffer.push(
-            np.asarray(obs), np.asarray(action), float(reward),
-            np.asarray(next_obs), bool(done),
-        )
-        ep_return += float(reward)
-        obs = next_obs
-
-        if done:
-            episode_returns.append(ep_return)
-            ep_return = 0.0
-
-        if len(buffer) >= runner_config.warmup_steps:
-            batch = buffer.sample(sac_config.batch_size)
-            agent_state, metrics = SAC.update(
-                agent_state, batch, config=sac_config,
+    try:
+        for step in range(start_step, runner_config.total_timesteps + 1):
+            agent_state, next_obs, env_state, action, reward, done = _act_and_step(
+                agent_state, obs, env_state, env.step, env_params, config=sac_config,
             )
 
-            if step % runner_config.log_interval == 0:
-                record = {
-                    "step": step,
-                    "actor_loss": float(metrics.actor_loss),
-                    "critic_loss": float(metrics.critic_loss),
-                    "alpha": float(metrics.alpha),
-                    "entropy": float(metrics.entropy),
-                    "q_mean": float(metrics.q_mean),
-                }
-                metrics_log.append(record)
-                if callback is not None:
-                    callback(step, agent_state, record)
+            buffer.push(
+                np.asarray(obs), np.asarray(action), float(reward),
+                np.asarray(next_obs), bool(done),
+            )
+            ep_return += float(reward)
+            obs = next_obs
+
+            if done:
+                episode_returns.append(ep_return)
+                ep_return = 0.0
+
+            if len(buffer) >= runner_config.warmup_steps:
+                batch = buffer.sample(sac_config.batch_size)
+                agent_state, metrics = SAC.update(
+                    agent_state, batch, config=sac_config,
+                )
+
+                if step % runner_config.log_interval == 0:
+                    record = {
+                        "step": step,
+                        "actor_loss": float(metrics.actor_loss),
+                        "critic_loss": float(metrics.critic_loss),
+                        "alpha": float(metrics.alpha),
+                        "entropy": float(metrics.entropy),
+                        "q_mean": float(metrics.q_mean),
+                    }
+                    metrics_log.append(record)
+                    if callback is not None:
+                        callback(step, agent_state, record)
+
+            # Periodic checkpointing
+            if ckpt_mgr is not None:
+                ckpt_mgr.save(step, agent_state)
+    finally:
+        if ckpt_mgr is not None:
+            ckpt_mgr.wait()
+            ckpt_mgr.close()
 
     return SACTrainResult(
         agent_state=agent_state,
