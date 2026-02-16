@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 
 from vibe_rl.env.base import Environment, EnvParams, EnvState
-from vibe_rl.env.spaces import Box, Discrete
+from vibe_rl.env.spaces import Box, Discrete, Image
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +182,250 @@ class ObsNormWrapper(Environment):
 
     def observation_space(self, params: EnvParams) -> Box | Discrete:
         return self.env.observation_space(params)
+
+    def action_space(self, params: EnvParams) -> Box | Discrete:
+        return self.env.action_space(params)
+
+
+# ---------------------------------------------------------------------------
+# Image resize with aspect-ratio padding
+# ---------------------------------------------------------------------------
+
+def _resize_with_pad(
+    image: jax.Array,
+    height: int,
+    width: int,
+    src_h: int,
+    src_w: int,
+) -> jax.Array:
+    """Resize an (H, W, C) image to (height, width, C) with aspect-ratio padding.
+
+    The image is scaled to fit within the target dimensions while
+    preserving the aspect ratio, then centered with zero-padding.
+
+    ``src_h`` and ``src_w`` are the *static* source dimensions so that
+    all shapes are known at trace time and compatible with ``jax.jit``.
+    """
+    scale = min(height / src_h, width / src_w)
+    new_h = int(round(src_h * scale))
+    new_w = int(round(src_w * scale))
+
+    # Resize using bilinear interpolation via jax.image.resize
+    resized = jax.image.resize(
+        image.astype(jnp.float32),
+        (new_h, new_w, image.shape[2]),
+        method="bilinear",
+    )
+
+    # Pad to target size, centering the resized image
+    pad_top = (height - new_h) // 2
+    pad_left = (width - new_w) // 2
+    padded = jnp.pad(
+        resized,
+        (
+            (pad_top, height - new_h - pad_top),
+            (pad_left, width - new_w - pad_left),
+            (0, 0),
+        ),
+    )
+    return padded.astype(image.dtype)
+
+
+class ImageResizeWrapper(Environment):
+    """Resizes image observations to ``(height, width)`` with aspect-ratio padding.
+
+    Input observations must be ``(H, W, C)`` arrays (e.g. from an ``Image`` space).
+    The resized output preserves the original dtype.
+    """
+
+    env: Environment
+    height: int = eqx.field(static=True)
+    width: int = eqx.field(static=True)
+    _src_h: int = eqx.field(static=True)
+    _src_w: int = eqx.field(static=True)
+
+    def __init__(self, env: Environment, height: int, width: int) -> None:
+        self.env = env
+        self.height = height
+        self.width = width
+        inner_space = env.observation_space(env.default_params())
+        self._src_h = inner_space.shape[0]
+        self._src_w = inner_space.shape[1]
+
+    def default_params(self) -> EnvParams:
+        return self.env.default_params()
+
+    def _resize(self, obs: jax.Array) -> jax.Array:
+        return _resize_with_pad(obs, self.height, self.width, self._src_h, self._src_w)
+
+    def reset(self, key: jax.Array, params: EnvParams) -> tuple[jax.Array, EnvState]:
+        obs, state = self.env.reset(key, params)
+        return self._resize(obs), state
+
+    def step(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[str, Any]]:
+        obs, state, reward, done, info = self.env.step(key, state, action, params)
+        return self._resize(obs), state, reward, done, info
+
+    def observation_space(self, params: EnvParams) -> Image:
+        inner_space = self.env.observation_space(params)
+        channels = inner_space.shape[2] if len(inner_space.shape) == 3 else 1
+        return Image(height=self.height, width=self.width, channels=channels)
+
+    def action_space(self, params: EnvParams) -> Box | Discrete:
+        return self.env.action_space(params)
+
+
+# ---------------------------------------------------------------------------
+# Frame stacking
+# ---------------------------------------------------------------------------
+
+class FrameStackState(EnvState):
+    """Wraps inner state and stores the frame buffer."""
+
+    inner: EnvState
+    frames: jax.Array  # (n_frames, H, W, C) or (n_frames, ...) buffer
+
+
+class FrameStackWrapper(Environment):
+    """Stacks the last ``n_frames`` observations along a new leading axis.
+
+    The output observation has shape ``(n_frames, *obs_shape)``.
+    On reset the initial observation is repeated ``n_frames`` times.
+    """
+
+    env: Environment
+    n_frames: int = eqx.field(static=True)
+
+    def __init__(self, env: Environment, n_frames: int) -> None:
+        self.env = env
+        self.n_frames = n_frames
+
+    def default_params(self) -> EnvParams:
+        return self.env.default_params()
+
+    def reset(self, key: jax.Array, params: EnvParams) -> tuple[jax.Array, FrameStackState]:
+        obs, inner = self.env.reset(key, params)
+        # Stack the first frame n_frames times
+        frames = jnp.repeat(obs[None], self.n_frames, axis=0)
+        state = FrameStackState(inner=inner, time=inner.time, frames=frames)
+        return frames, state
+
+    def step(
+        self,
+        key: jax.Array,
+        state: FrameStackState,
+        action: jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, FrameStackState, jax.Array, jax.Array, dict[str, Any]]:
+        obs, inner, reward, done, info = self.env.step(key, state.inner, action, params)
+        # Shift frames: drop oldest, append newest
+        frames = jnp.concatenate([state.frames[1:], obs[None]], axis=0)
+        new_state = FrameStackState(inner=inner, time=inner.time, frames=frames)
+        return frames, new_state, reward, done, info
+
+    def observation_space(self, params: EnvParams) -> Box:
+        inner_space = self.env.observation_space(params)
+        shape = (self.n_frames, *inner_space.shape)
+        low = float(getattr(inner_space, 'low', jnp.array(0.0)).min()) if hasattr(inner_space, 'low') else 0.0
+        high = float(getattr(inner_space, 'high', jnp.array(255.0)).max()) if hasattr(inner_space, 'high') else 255.0
+        return Box(low=low, high=high, shape=shape)
+
+    def action_space(self, params: EnvParams) -> Box | Discrete:
+        return self.env.action_space(params)
+
+
+# ---------------------------------------------------------------------------
+# Grayscale conversion
+# ---------------------------------------------------------------------------
+
+class GrayscaleWrapper(Environment):
+    """Converts RGB image observations to single-channel grayscale.
+
+    Input must be ``(H, W, 3)`` RGB. Output is ``(H, W, 1)`` with the
+    standard luminance weights ``0.2989 R + 0.5870 G + 0.1140 B``.
+    """
+
+    env: Environment
+
+    def __init__(self, env: Environment) -> None:
+        self.env = env
+
+    def default_params(self) -> EnvParams:
+        return self.env.default_params()
+
+    @staticmethod
+    def _to_gray(obs: jax.Array) -> jax.Array:
+        weights = jnp.array([0.2989, 0.5870, 0.1140], dtype=jnp.float32)
+        gray = jnp.sum(obs.astype(jnp.float32) * weights, axis=-1, keepdims=True)
+        return gray.astype(obs.dtype)
+
+    def reset(self, key: jax.Array, params: EnvParams) -> tuple[jax.Array, EnvState]:
+        obs, state = self.env.reset(key, params)
+        return self._to_gray(obs), state
+
+    def step(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[str, Any]]:
+        obs, state, reward, done, info = self.env.step(key, state, action, params)
+        return self._to_gray(obs), state, reward, done, info
+
+    def observation_space(self, params: EnvParams) -> Image:
+        inner_space = self.env.observation_space(params)
+        return Image(height=inner_space.shape[0], width=inner_space.shape[1], channels=1)
+
+    def action_space(self, params: EnvParams) -> Box | Discrete:
+        return self.env.action_space(params)
+
+
+# ---------------------------------------------------------------------------
+# Image normalization: uint8 [0,255] → float32 [-1,1]
+# ---------------------------------------------------------------------------
+
+class ImageNormWrapper(Environment):
+    """Normalises uint8 ``[0, 255]`` image observations to float32 ``[-1, 1]``.
+
+    The mapping is ``x_norm = x / 127.5 - 1.0``.
+    """
+
+    env: Environment
+
+    def __init__(self, env: Environment) -> None:
+        self.env = env
+
+    def default_params(self) -> EnvParams:
+        return self.env.default_params()
+
+    @staticmethod
+    def _normalize(obs: jax.Array) -> jax.Array:
+        return obs.astype(jnp.float32) / 127.5 - 1.0
+
+    def reset(self, key: jax.Array, params: EnvParams) -> tuple[jax.Array, EnvState]:
+        obs, state = self.env.reset(key, params)
+        return self._normalize(obs), state
+
+    def step(
+        self,
+        key: jax.Array,
+        state: EnvState,
+        action: jax.Array,
+        params: EnvParams,
+    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[str, Any]]:
+        obs, state, reward, done, info = self.env.step(key, state, action, params)
+        return self._normalize(obs), state, reward, done, info
+
+    def observation_space(self, params: EnvParams) -> Box:
+        inner_space = self.env.observation_space(params)
+        return Box(low=-1.0, high=1.0, shape=inner_space.shape)
 
     def action_space(self, params: EnvParams) -> Box | Discrete:
         return self.env.action_space(params)

@@ -19,7 +19,11 @@ from vibe_rl.env.pixel_grid_world import PixelGridWorld, PixelGridWorldParams
 from vibe_rl.env.spaces import Box, Discrete, Image, MultiBinary
 from vibe_rl.env.wrappers import (
     AutoResetWrapper,
+    FrameStackWrapper,
+    GrayscaleWrapper,
     GymnasiumWrapper,
+    ImageNormWrapper,
+    ImageResizeWrapper,
     ObsNormWrapper,
     RewardScaleWrapper,
 )
@@ -80,6 +84,10 @@ __all__ = [
     "AutoResetWrapper",
     "RewardScaleWrapper",
     "ObsNormWrapper",
+    "ImageResizeWrapper",
+    "FrameStackWrapper",
+    "GrayscaleWrapper",
+    "ImageNormWrapper",
     "GymnasiumWrapper",
     # Registry
     "make",
