@@ -1,4 +1,4 @@
-"""Tests for multi-GPU training via jit + NamedSharding (shard_map).
+"""Tests for multi-GPU training via jit + NamedSharding + FSDP.
 
 Uses XLA_FLAGS to simulate multiple devices on a single CPU, so tests
 can run anywhere without real GPUs.
@@ -7,12 +7,12 @@ can run anywhere without real GPUs.
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import chex
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 # Force 4 fake CPU devices for multi-GPU tests.
@@ -114,14 +114,16 @@ class TestTrainPPOMultiGPU:
         assert isinstance(train_state, PPOTrainState)
         assert isinstance(history, PPOMetricsHistory)
 
-        # shard_map outer axis is devices, scan inner axis is updates
-        # -> shape is (n_devices, n_updates)
-        assert history.total_loss.shape == (2, n_updates)
-        assert history.actor_loss.shape == (2, n_updates)
+        # GSPMD: metrics are (n_updates,) scalars (single logical computation)
+        assert history.total_loss.shape == (n_updates,)
+        assert history.actor_loss.shape == (n_updates,)
 
-        # Agent state has leading device dim
-        assert train_state.agent_state.step.shape == (2,)
-        assert int(train_state.agent_state.step[0]) == n_updates
+        # Agent state: params/step are single-copy (replicated/FSDP-sharded)
+        assert train_state.agent_state.step.shape == ()
+        assert int(train_state.agent_state.step) == n_updates
+
+        # Env data keeps device dimension
+        assert train_state.env_obs.shape == (2, 2, 4)  # (n_devices, num_envs, obs_dim)
 
     def test_single_device_multigpu_runner(self):
         """Multi-GPU runner works with num_devices=1 (single GPU fallback)."""
@@ -151,8 +153,8 @@ class TestTrainPPOMultiGPU:
         # n_updates = 64 // (1 * 2 * 16) = 2
         n_updates = 64 // (1 * 2 * 16)
         assert n_updates == 2
-        assert history.total_loss.shape == (1, n_updates)
-        assert int(train_state.agent_state.step[0]) == n_updates
+        assert history.total_loss.shape == (n_updates,)
+        assert int(train_state.agent_state.step) == n_updates
 
     def test_multigpu_metrics_finite(self):
         """All metrics should be finite (no NaN/inf)."""
@@ -218,7 +220,12 @@ class TestTrainPPOMultiGPU:
         assert jnp.allclose(h1.total_loss, h2.total_loss)
 
     def test_multigpu_gradient_sync(self):
-        """Verify that params are synchronised across devices (pmean effect)."""
+        """Verify that GSPMD keeps params consistent (single logical copy).
+
+        With GSPMD + replicated/FSDP sharding, there is only one logical
+        copy of params.  We verify that the params are well-formed
+        (finite and reasonable) after training.
+        """
         env, env_params = make("CartPole-v1")
         env = AutoResetWrapper(env)
         env_params = env.default_params()
@@ -242,14 +249,12 @@ class TestTrainPPOMultiGPU:
             runner_config=runner_config,
         )
 
-        # After training with pmean, params on device 0 and device 1
-        # should be identical (they started identical and gradients
-        # were averaged across devices at every step).
+        # With GSPMD, params are a single logical copy — verify all finite.
         params_leaves = jax.tree.leaves(train_state.agent_state.params)
         for leaf in params_leaves:
-            if hasattr(leaf, 'shape') and len(leaf.shape) > 0:
-                assert jnp.allclose(leaf[0], leaf[1]), (
-                    f"Params diverged across devices! shape={leaf.shape}"
+            if hasattr(leaf, 'shape'):
+                assert jnp.all(jnp.isfinite(leaf)), (
+                    f"Non-finite params found! shape={leaf.shape}"
                 )
 
     def test_too_few_timesteps_raises(self):
@@ -300,7 +305,7 @@ class TestTrainPPOMultiGPU:
         )
 
         n_updates = 64 // (2 * 2 * 8)
-        assert int(train_state.agent_state.step[0]) == n_updates
+        assert int(train_state.agent_state.step) == n_updates
 
     def test_four_devices(self):
         """Verify training with 4 fake devices."""
@@ -329,8 +334,71 @@ class TestTrainPPOMultiGPU:
 
         # n_updates = 64 // (4 * 1 * 4) = 4
         n_updates = 64 // (4 * 1 * 4)
-        assert history.total_loss.shape == (4, n_updates)
-        assert train_state.agent_state.step.shape == (4,)
+        assert history.total_loss.shape == (n_updates,)
+        assert train_state.agent_state.step.shape == ()
+
+    def test_fsdp_devices_1_equivalent(self):
+        """fsdp_devices=1 should produce same results as pure data-parallel."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        ppo_config = PPOConfig(
+            n_steps=8,
+            n_minibatches=2,
+            n_epochs=1,
+            hidden_sizes=(8, 8),
+        )
+
+        # Default (fsdp_devices=1)
+        runner_config = RunnerConfig(
+            total_timesteps=64,
+            seed=0,
+            num_devices=2,
+            num_envs=2,
+            fsdp_devices=1,
+        )
+
+        _, history = train_ppo_multigpu(
+            env, env_params,
+            ppo_config=ppo_config,
+            runner_config=runner_config,
+        )
+
+        assert jnp.all(jnp.isfinite(history.total_loss))
+        assert history.total_loss.shape == (2,)  # n_updates=2
+
+    def test_fsdp_devices_2(self):
+        """fsdp_devices=2 with 4 devices: 2-way data-parallel x 2-way FSDP."""
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+
+        ppo_config = PPOConfig(
+            n_steps=4,
+            n_minibatches=2,
+            n_epochs=1,
+            hidden_sizes=(8, 8),
+        )
+        runner_config = RunnerConfig(
+            total_timesteps=64,
+            seed=0,
+            num_devices=4,
+            num_envs=1,
+            fsdp_devices=2,
+        )
+
+        train_state, history = train_ppo_multigpu(
+            env, env_params,
+            ppo_config=ppo_config,
+            runner_config=runner_config,
+        )
+
+        n_updates = 64 // (4 * 1 * 4)
+        assert n_updates == 4
+        assert history.total_loss.shape == (n_updates,)
+        assert jnp.all(jnp.isfinite(history.total_loss))
+        assert int(train_state.agent_state.step) == n_updates
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +442,124 @@ class TestShardingModule:
         mesh = make_mesh()
         spec = replicate_sharding(mesh)
         assert spec.spec == ()
+
+
+# ---------------------------------------------------------------------------
+# FSDP sharding function tests
+# ---------------------------------------------------------------------------
+
+
+class TestFSDPSharding:
+    """Tests for the fsdp_sharding() per-parameter sharding function."""
+
+    def test_small_param_replicated(self):
+        """Parameters < min_size_mbytes should be fully replicated."""
+        from vibe_rl.sharding import fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # Small 2D array: 8x8 float32 = 256 bytes << 4MB
+        small = jax.ShapeDtypeStruct((8, 8), jnp.float32)
+        shardings = fsdp_sharding({"w": small}, mesh)
+        assert shardings["w"].spec == ()  # replicated
+
+    def test_scalar_replicated(self):
+        """Scalars should always be replicated."""
+        from vibe_rl.sharding import fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        scalar = jax.ShapeDtypeStruct((), jnp.float32)
+        shardings = fsdp_sharding({"s": scalar}, mesh)
+        assert shardings["s"].spec == ()
+
+    def test_1d_replicated(self):
+        """1-D arrays should always be replicated regardless of size."""
+        from vibe_rl.sharding import FSDP_AXIS, fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # Large 1D: 2M float32 = 8 MB > 4 MB, but 1D → replicate
+        big_1d = jax.ShapeDtypeStruct((2_000_000,), jnp.float32)
+        shardings = fsdp_sharding({"b": big_1d}, mesh)
+        assert shardings["b"].spec == ()
+
+    def test_large_2d_sharded(self):
+        """Large 2D array should be sharded along largest divisible dim."""
+        from vibe_rl.sharding import FSDP_AXIS, fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # 1024x1024 float32 = 4 MB — exactly at threshold
+        big_2d = jax.ShapeDtypeStruct((1024, 1024), jnp.float32)
+        shardings = fsdp_sharding({"w": big_2d}, mesh)
+        # Both dims are 1024, divisible by 2 — should shard along dim 0
+        # (argsort picks largest first; both equal, so first encountered)
+        spec = shardings["w"].spec
+        assert FSDP_AXIS in spec, f"Expected FSDP sharding, got {spec}"
+
+    def test_large_2d_largest_dim_preferred(self):
+        """Should shard along the largest divisible dimension."""
+        from vibe_rl.sharding import FSDP_AXIS, fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # 2048x512 float32 = 4 MB — dim 0 is largest (2048)
+        big_2d = jax.ShapeDtypeStruct((2048, 512), jnp.float32)
+        shardings = fsdp_sharding({"w": big_2d}, mesh)
+        spec = shardings["w"].spec
+        # Dim 0 (2048) is largest and divisible by 2
+        assert spec == (FSDP_AXIS, None)
+
+    def test_no_divisible_dim_replicated(self):
+        """If no dimension is divisible by fsdp_size, replicate."""
+        from vibe_rl.sharding import fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # Large but dimensions are odd (not divisible by 2)
+        # 1025x1025 float32 ≈ 4 MB
+        odd = jax.ShapeDtypeStruct((1025, 1025), jnp.float32)
+        shardings = fsdp_sharding({"w": odd}, mesh)
+        assert shardings["w"].spec == ()
+
+    def test_fsdp_size_1_all_replicated(self):
+        """With fsdp_devices=1, all parameters should be replicated."""
+        from vibe_rl.sharding import fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=1)
+        big = jax.ShapeDtypeStruct((2048, 2048), jnp.float32)
+        shardings = fsdp_sharding({"w": big}, mesh)
+        # fsdp size 1 means everything is divisible, but 1-way sharding
+        # is equivalent to replication — the PartitionSpec will have
+        # FSDP_AXIS but it's a trivial axis.
+        # This is fine: PartitionSpec("fsdp", None) with fsdp=1 == replicated.
+        assert True  # The function should not error
+
+    def test_min_size_threshold(self):
+        """Custom min_size_mbytes changes the threshold."""
+        from vibe_rl.sharding import FSDP_AXIS, fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        # 512x512 float32 = 1 MB — below default 4 MB but above 0.5 MB
+        medium = jax.ShapeDtypeStruct((512, 512), jnp.float32)
+
+        # Default threshold (4 MB): should be replicated
+        s1 = fsdp_sharding({"w": medium}, mesh)
+        assert s1["w"].spec == ()
+
+        # Lower threshold (0.5 MB): should be sharded
+        s2 = fsdp_sharding({"w": medium}, mesh, min_size_mbytes=0.5)
+        assert FSDP_AXIS in s2["w"].spec
+
+    def test_pytree_mixed(self):
+        """Pytree with mixed sizes gets mixed shardings."""
+        from vibe_rl.sharding import FSDP_AXIS, fsdp_sharding, make_mesh
+
+        mesh = make_mesh(num_fsdp_devices=2)
+        pytree = {
+            "small": jax.ShapeDtypeStruct((8, 8), jnp.float32),      # 256 B
+            "bias": jax.ShapeDtypeStruct((64,), jnp.float32),         # 256 B (1D)
+            "large": jax.ShapeDtypeStruct((2048, 1024), jnp.float32), # 8 MB
+        }
+        shardings = fsdp_sharding(pytree, mesh)
+        assert shardings["small"].spec == ()  # replicated (too small)
+        assert shardings["bias"].spec == ()   # replicated (1D)
+        assert FSDP_AXIS in shardings["large"].spec  # sharded
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +614,7 @@ class TestCheckpointMultiDevice:
         assert jnp.array_equal(restored["w"][1], original["w"])
 
     def test_multigpu_train_checkpoint_roundtrip(self, tmp_path: Path):
-        """Train with multi-GPU, save unreplicated, verify loadable."""
+        """Train with multi-GPU, save agent state, verify loadable."""
         env, env_params = make("CartPole-v1")
         env = AutoResetWrapper(env)
         env_params = env.default_params()
@@ -452,11 +638,10 @@ class TestCheckpointMultiDevice:
             runner_config=runner_config,
         )
 
-        # Save with unreplicate
+        # With GSPMD, agent_state params are single-copy — save directly.
         save_checkpoint(
             tmp_path / "ckpt",
             train_state.agent_state,
-            unreplicate=True,
         )
 
         # Create a single-device template

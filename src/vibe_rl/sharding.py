@@ -1,4 +1,4 @@
-"""Mesh and sharding utilities for data-parallel (and future FSDP) training.
+"""Mesh and sharding utilities for data-parallel and FSDP training.
 
 Provides a 2-D device mesh ``(batch, fsdp)`` and helpers for placing
 data and parameters on the correct devices.  When ``fsdp_devices=1``
@@ -15,6 +15,9 @@ Usage::
     mesh = make_mesh()  # pure data-parallel by default
     data_spec = data_sharding(mesh)       # shard leading axis over batch
     param_spec = replicate_sharding(mesh) # replicate everywhere
+
+    # FSDP: per-parameter sharding based on size/shape
+    param_shardings = fsdp_sharding(params, mesh)
 
 Reference: openpi/src/openpi/training/sharding.py
 """
@@ -105,6 +108,63 @@ def replicate_sharding(mesh: Mesh) -> NamedSharding:
     Every device gets a full copy.
     """
     return NamedSharding(mesh, PartitionSpec())
+
+
+def fsdp_sharding(pytree, mesh: Mesh, *, min_size_mbytes: float = 4) -> object:
+    """Compute per-parameter FSDP sharding for a pytree.
+
+    Decides for each array in *pytree* whether to shard it across the
+    ``fsdp`` mesh axis or fully replicate, based on size and shape:
+
+    - Arrays < *min_size_mbytes* → replicated (communication overhead
+      exceeds the memory savings from sharding).
+    - Scalars and 1-D arrays → replicated.
+    - 2-D+ arrays >= threshold → sharded along the largest dimension
+      that is evenly divisible by the FSDP axis size.
+    - If no dimension is divisible → replicated (fallback).
+
+    When ``mesh.shape[FSDP_AXIS] == 1`` every parameter is replicated,
+    making the result equivalent to pure data-parallelism.
+
+    Args:
+        pytree: A JAX pytree of arrays (e.g. model params from
+            ``jax.eval_shape``).  May contain ``jax.ShapeDtypeStruct``
+            or concrete arrays.
+        mesh: The device mesh (must have an ``"fsdp"`` axis).
+        min_size_mbytes: Minimum array size in MB to consider for
+            sharding.  Default is 4 MB.
+
+    Returns:
+        A pytree with the same structure as *pytree*, where each leaf
+        is replaced by a ``NamedSharding`` specifying how that
+        parameter should be distributed.
+    """
+    fsdp_size = mesh.shape[FSDP_AXIS]
+
+    def _get_sharding(array):
+        # Size in MB (works for both concrete arrays and ShapeDtypeStruct)
+        size_mb = np.prod(array.shape) * np.dtype(array.dtype).itemsize / (1024 * 1024)
+
+        # Rule 1: small arrays → replicate
+        if size_mb < min_size_mbytes:
+            return NamedSharding(mesh, PartitionSpec())
+
+        # Rule 2: scalars and 1-D → replicate
+        if len(array.shape) < 2:
+            return NamedSharding(mesh, PartitionSpec())
+
+        # Rule 3: shard along the largest divisible dimension
+        axes_by_size = np.argsort(array.shape)[::-1]  # largest dim first
+        spec = [None] * len(array.shape)
+        for i in axes_by_size:
+            if array.shape[i] % fsdp_size == 0:
+                spec[i] = FSDP_AXIS
+                return NamedSharding(mesh, PartitionSpec(*spec))
+
+        # Fallback: replicate
+        return NamedSharding(mesh, PartitionSpec())
+
+    return jax.tree.map(_get_sharding, pytree)
 
 
 def activation_sharding_constraint(x, mesh: Mesh):
