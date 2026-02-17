@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda = [
+    "jax-cuda12-plugin[with_cuda]>=0.4.35",
+]
 envs = [
     "gymnax>=0.0.8",
     "brax>=0.12",
@@ -45,7 +48,7 @@ dev = [
     "ruff>=0.8",
 ]
 all = [
-    "vibe-rl[envs,checkpoint,data,serving,plotting,dev]",
+    "vibe-rl[cuda,envs,checkpoint,data,serving,plotting,dev]",
 ]
 
 [build-system]
