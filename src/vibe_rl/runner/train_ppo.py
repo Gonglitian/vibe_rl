@@ -65,6 +65,7 @@ class PPOTrainState(NamedTuple):
     env_obs: chex.Array
     env_state: EnvState
     rng: chex.PRNGKey
+    ep_return_sum: chex.Array  # running sum of rewards in current episode(s)
 
 
 class PPOMetricsHistory(NamedTuple):
@@ -79,6 +80,7 @@ class PPOMetricsHistory(NamedTuple):
     critic_loss: chex.Array
     entropy: chex.Array
     approx_kl: chex.Array
+    episode_return: chex.Array
 
 
 def train_ppo(
@@ -153,6 +155,57 @@ def train_ppo(
     return train_state, history
 
 
+def _episode_returns_from_rollout(
+    rewards: chex.Array,
+    dones: chex.Array,
+    ep_return_sum: chex.Array,
+) -> tuple[chex.Array, chex.Array, chex.Array]:
+    """Compute mean episode return from a rollout's rewards and done flags.
+
+    Accumulates rewards step-by-step.  Whenever ``done=True``, the
+    accumulated sum is recorded as a completed episode return.
+
+    Args:
+        rewards: shape ``(T,)`` or ``(T, N)`` for vectorized envs.
+        dones: shape ``(T,)`` or ``(T, N)``.
+        ep_return_sum: running episode return carried from previous
+            rollout; shape ``()`` or ``(N,)``.
+
+    Returns:
+        ``(mean_episode_return, n_episodes, new_ep_return_sum)`` where
+        *mean_episode_return* is the average over completed episodes
+        (0.0 if none completed), and *new_ep_return_sum* is the
+        carry-over for the next rollout.
+    """
+
+    def _scan_fn(carry, step):
+        running_sum, total_return, n_eps = carry
+        reward, done = step
+        running_sum = running_sum + reward
+        # On done: add completed return and reset accumulator
+        total_return = total_return + running_sum * done
+        n_eps = n_eps + done
+        running_sum = running_sum * (1.0 - done)
+        return (running_sum, total_return, n_eps), None
+
+    zero = jnp.zeros_like(ep_return_sum)
+    init = (ep_return_sum, zero, zero)
+    (new_ep_return_sum, total_return, n_eps), _ = jax.lax.scan(
+        _scan_fn, init, (rewards, dones),
+    )
+
+    # Sum across envs for vectorized case (N,) -> ()
+    total_return_scalar = total_return.sum()
+    n_eps_scalar = n_eps.sum()
+
+    mean_return = jnp.where(
+        n_eps_scalar > 0,
+        total_return_scalar / n_eps_scalar,
+        jnp.float32(0.0),
+    )
+    return mean_return, n_eps_scalar, new_ep_return_sum
+
+
 def _write_ppo_metrics(
     run_dir: RunDir,
     history: PPOMetricsHistory,
@@ -162,14 +215,16 @@ def _write_ppo_metrics(
     with MetricsLogger(run_dir.log_path()) as logger:
         n_updates = int(history.total_loss.shape[0])
         for i in range(n_updates):
-            logger.write({
+            record: dict[str, float] = {
                 "step": (i + 1) * steps_per_update,
                 "total_loss": float(history.total_loss[i]),
                 "actor_loss": float(history.actor_loss[i]),
                 "critic_loss": float(history.critic_loss[i]),
                 "entropy": float(history.entropy[i]),
                 "approx_kl": float(history.approx_kl[i]),
-            })
+                "episode_return": float(history.episode_return[i]),
+            }
+            logger.write(record)
 
 
 def _train_ppo_single(
@@ -201,11 +256,12 @@ def _train_ppo_single(
             env_obs=env_obs,
             env_state=env_state,
             rng=rng,
+            ep_return_sum=jnp.float32(0.0),
         )
 
         def _scan_body(
             train_state: PPOTrainState, _: None,
-        ) -> tuple[PPOTrainState, PPOMetrics]:
+        ) -> tuple[PPOTrainState, PPOMetricsHistory]:
             rng, _ = jax.random.split(train_state.rng)
 
             # Collect a full rollout
@@ -220,6 +276,11 @@ def _train_ppo_single(
                 )
             )
 
+            # Compute episode returns from this rollout
+            mean_ep_return, _n_eps, new_ep_return_sum = _episode_returns_from_rollout(
+                trajectories.reward, trajectories.done, train_state.ep_return_sum,
+            )
+
             # PPO update
             agent_state, metrics = PPO.update(
                 agent_state, trajectories, last_value, config=_ppo_config,
@@ -230,20 +291,22 @@ def _train_ppo_single(
                 env_obs=final_obs,
                 env_state=final_env_state,
                 rng=rng,
+                ep_return_sum=new_ep_return_sum,
             )
-            return new_train_state, metrics
+            update_metrics = PPOMetricsHistory(
+                total_loss=metrics.total_loss,
+                actor_loss=metrics.actor_loss,
+                critic_loss=metrics.critic_loss,
+                entropy=metrics.entropy,
+                approx_kl=metrics.approx_kl,
+                episode_return=mean_ep_return,
+            )
+            return new_train_state, update_metrics
 
-        final_state, metrics_history = jax.lax.scan(
+        final_state, history = jax.lax.scan(
             _scan_body, init_state, None, length=_n_updates,
         )
 
-        history = PPOMetricsHistory(
-            total_loss=metrics_history.total_loss,
-            actor_loss=metrics_history.actor_loss,
-            critic_loss=metrics_history.critic_loss,
-            entropy=metrics_history.entropy,
-            approx_kl=metrics_history.approx_kl,
-        )
         return final_state, history
 
     rng = jax.random.PRNGKey(seed)
@@ -290,11 +353,12 @@ def _train_ppo_vectorized(
             env_obs=env_obs,
             env_state=env_states,
             rng=rng,
+            ep_return_sum=jnp.zeros(_num_envs, dtype=jnp.float32),
         )
 
         def _scan_body(
             train_state: PPOTrainState, _: None,
-        ) -> tuple[PPOTrainState, PPOMetrics]:
+        ) -> tuple[PPOTrainState, PPOMetricsHistory]:
             rng, _ = jax.random.split(train_state.rng)
 
             # Collect rollouts from N parallel environments
@@ -309,6 +373,11 @@ def _train_ppo_vectorized(
                 )
             )
 
+            # Compute episode returns from this rollout
+            mean_ep_return, _n_eps, new_ep_return_sum = _episode_returns_from_rollout(
+                trajectories.reward, trajectories.done, train_state.ep_return_sum,
+            )
+
             # PPO update — handles (T, N, ...) shaped trajectories
             agent_state, metrics = PPO.update(
                 agent_state, trajectories, last_values, config=_ppo_config,
@@ -319,20 +388,22 @@ def _train_ppo_vectorized(
                 env_obs=final_obs,
                 env_state=final_env_states,
                 rng=rng,
+                ep_return_sum=new_ep_return_sum,
             )
-            return new_train_state, metrics
+            update_metrics = PPOMetricsHistory(
+                total_loss=metrics.total_loss,
+                actor_loss=metrics.actor_loss,
+                critic_loss=metrics.critic_loss,
+                entropy=metrics.entropy,
+                approx_kl=metrics.approx_kl,
+                episode_return=mean_ep_return,
+            )
+            return new_train_state, update_metrics
 
-        final_state, metrics_history = jax.lax.scan(
+        final_state, history = jax.lax.scan(
             _scan_body, init_state, None, length=_n_updates,
         )
 
-        history = PPOMetricsHistory(
-            total_loss=metrics_history.total_loss,
-            actor_loss=metrics_history.actor_loss,
-            critic_loss=metrics_history.critic_loss,
-            entropy=metrics_history.entropy,
-            approx_kl=metrics_history.approx_kl,
-        )
         return final_state, history
 
     rng = jax.random.PRNGKey(seed)

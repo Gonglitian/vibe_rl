@@ -65,7 +65,7 @@ from vibe_rl.runner.device_utils import (
     split_key_across_devices,
     unreplicate,
 )
-from vibe_rl.runner.train_ppo import PPOMetricsHistory, PPOTrainState
+from vibe_rl.runner.train_ppo import PPOMetricsHistory, PPOTrainState, _episode_returns_from_rollout
 from vibe_rl.sharding import (
     BATCH_AXIS,
     DATA_AXIS,
@@ -200,6 +200,7 @@ def train_ppo_multigpu(
         env_obs=env_obs,
         env_state=env_states,
         rng=loop_key,
+        ep_return_sum=jnp.zeros((n_devices, num_envs), dtype=jnp.float32),
     )
 
     # ------------------------------------------------------------------
@@ -219,6 +220,7 @@ def train_ppo_multigpu(
         env_obs=data_spec,
         env_state=env_state_shardings,
         rng=replicated_spec,
+        ep_return_sum=data_spec,
     )
 
     # Metrics are per-update scalars from the scan → (n_updates,), replicated.
@@ -228,6 +230,7 @@ def train_ppo_multigpu(
         critic_loss=replicated_spec,
         entropy=replicated_spec,
         approx_kl=replicated_spec,
+        episode_return=replicated_spec,
     )
 
     # ------------------------------------------------------------------
@@ -457,7 +460,7 @@ def train_ppo_multigpu(
         # ---- Main scan loop over updates ----
         def _scan_body(
             train_state: PPOTrainState, _: None,
-        ) -> tuple[PPOTrainState, PPOMetrics]:
+        ) -> tuple[PPOTrainState, PPOMetricsHistory]:
             loop_rng, _ = jax.random.split(train_state.rng)
 
             agent_state, trajectories, final_obs, final_env_state, last_value = (
@@ -468,6 +471,19 @@ def train_ppo_multigpu(
                 )
             )
 
+            # Compute episode returns from rollout
+            # trajectories.reward: (n_steps, n_devices, num_envs)
+            # Flatten device+env dims for episode tracking, then reshape back
+            T = ppo_config.n_steps
+            flat_reward = trajectories.reward.reshape(T, n_devices * num_envs)
+            flat_done = trajectories.done.reshape(T, n_devices * num_envs)
+            flat_ep_sum = train_state.ep_return_sum.reshape(n_devices * num_envs)
+
+            mean_ep_return, _n_eps, new_flat_ep_sum = _episode_returns_from_rollout(
+                flat_reward, flat_done, flat_ep_sum,
+            )
+            new_ep_return_sum = new_flat_ep_sum.reshape(n_devices, num_envs)
+
             agent_state, metrics = _update_step(
                 agent_state, trajectories, last_value,
             )
@@ -477,19 +493,20 @@ def train_ppo_multigpu(
                 env_obs=final_obs,
                 env_state=final_env_state,
                 rng=loop_rng,
+                ep_return_sum=new_ep_return_sum,
             )
-            return new_train_state, metrics
+            update_metrics = PPOMetricsHistory(
+                total_loss=metrics.total_loss,
+                actor_loss=metrics.actor_loss,
+                critic_loss=metrics.critic_loss,
+                entropy=metrics.entropy,
+                approx_kl=metrics.approx_kl,
+                episode_return=mean_ep_return,
+            )
+            return new_train_state, update_metrics
 
-        final_state, metrics_history = jax.lax.scan(
+        final_state, history = jax.lax.scan(
             _scan_body, train_state, None, length=n_updates,
-        )
-
-        history = PPOMetricsHistory(
-            total_loss=metrics_history.total_loss,
-            actor_loss=metrics_history.actor_loss,
-            critic_loss=metrics_history.critic_loss,
-            entropy=metrics_history.entropy,
-            approx_kl=metrics_history.approx_kl,
         )
 
         return final_state, history

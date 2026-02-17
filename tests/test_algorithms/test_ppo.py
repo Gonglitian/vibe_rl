@@ -9,6 +9,7 @@ from vibe_rl.algorithms.ppo.types import ActorCriticParams, PPOState
 from vibe_rl.dataprotocol.transition import PPOTransition
 from vibe_rl.env import make
 from vibe_rl.env.wrappers import AutoResetWrapper
+from vibe_rl.runner.train_ppo import _episode_returns_from_rollout
 
 
 class TestActorCategorical:
@@ -178,3 +179,84 @@ class TestPPO:
             state, metrics = PPO.update(state, traj, lv, config=config)
 
         assert int(state.step) == 3
+
+
+class TestEpisodeReturns:
+    def test_single_episode(self):
+        """One completed episode in the rollout."""
+        rewards = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0])
+        dones = jnp.array([0.0, 0.0, 1.0, 0.0, 0.0])
+        ep_sum = jnp.float32(0.0)
+
+        mean_ret, n_eps, new_sum = _episode_returns_from_rollout(rewards, dones, ep_sum)
+        assert float(n_eps) == 1.0
+        assert float(mean_ret) == 3.0  # 1 + 1 + 1
+        # Remaining: 0 + 0 = 0 still accumulating
+        assert float(new_sum) == 0.0
+
+    def test_two_episodes(self):
+        """Two episodes complete in a single rollout."""
+        rewards = jnp.array([1.0, 2.0, 0.0, 3.0, 4.0])
+        dones = jnp.array([0.0, 1.0, 0.0, 0.0, 1.0])
+        ep_sum = jnp.float32(0.0)
+
+        mean_ret, n_eps, new_sum = _episode_returns_from_rollout(rewards, dones, ep_sum)
+        assert float(n_eps) == 2.0
+        # ep1: 1+2=3, ep2: 0+3+4=7, mean=(3+7)/2=5
+        assert float(mean_ret) == 5.0
+        assert float(new_sum) == 0.0
+
+    def test_carry_over(self):
+        """Episode spans across rollout boundaries."""
+        rewards = jnp.array([1.0, 1.0])
+        dones = jnp.array([0.0, 0.0])
+        ep_sum = jnp.float32(5.0)  # 5 accumulated from previous rollout
+
+        mean_ret, n_eps, new_sum = _episode_returns_from_rollout(rewards, dones, ep_sum)
+        assert float(n_eps) == 0.0
+        assert float(mean_ret) == 0.0  # no completed episodes
+        assert float(new_sum) == 7.0  # 5 + 1 + 1
+
+    def test_carry_then_complete(self):
+        """Carry-over episode completes mid-rollout."""
+        rewards = jnp.array([1.0, 1.0, 2.0])
+        dones = jnp.array([1.0, 0.0, 0.0])
+        ep_sum = jnp.float32(3.0)  # from previous rollout
+
+        mean_ret, n_eps, new_sum = _episode_returns_from_rollout(rewards, dones, ep_sum)
+        assert float(n_eps) == 1.0
+        assert float(mean_ret) == 4.0  # 3 + 1 = 4
+        assert float(new_sum) == 3.0  # 1 + 2 still in progress
+
+    def test_vectorized(self):
+        """Works with (T, N) shaped inputs for multi-env."""
+        rewards = jnp.array([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]])  # (3, 2)
+        dones = jnp.array([[0.0, 1.0], [1.0, 0.0], [0.0, 0.0]])    # (3, 2)
+        ep_sum = jnp.zeros(2, dtype=jnp.float32)
+
+        mean_ret, n_eps, new_sum = _episode_returns_from_rollout(rewards, dones, ep_sum)
+        # env0: episode at t=1 with return 1+1=2, then accumulating 1
+        # env1: episode at t=0 with return 2, then accumulating 2+2=4
+        assert float(n_eps) == 2.0
+        assert float(mean_ret) == 2.0  # (2 + 2) / 2
+        assert float(new_sum[0]) == 1.0
+        assert float(new_sum[1]) == 4.0
+
+    def test_train_ppo_has_episode_return(self):
+        """Full train_ppo returns episode_return in metrics history."""
+        from vibe_rl.runner import RunnerConfig, train_ppo
+
+        env, env_params = make("CartPole-v1")
+        env = AutoResetWrapper(env)
+        env_params = env.default_params()
+        ppo_config = PPOConfig(
+            n_steps=32, n_minibatches=2, n_epochs=2, hidden_sizes=(32, 32),
+        )
+        runner_config = RunnerConfig(total_timesteps=256, seed=0)
+
+        train_state, history = train_ppo(
+            env, env_params, ppo_config=ppo_config, runner_config=runner_config,
+        )
+        assert hasattr(history, "episode_return")
+        n_updates = 256 // 32
+        assert history.episode_return.shape == (n_updates,)
