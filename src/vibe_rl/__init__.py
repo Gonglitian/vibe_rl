@@ -12,6 +12,7 @@ from vibe_rl.checkpoint import (
 from vibe_rl.env import make
 from vibe_rl.metrics import (
     MetricsLogger,
+    TrainingProgress,
     log_step_progress,
     resume_wandb,
     setup_logging,
@@ -28,6 +29,7 @@ __all__ = [
     "CheckpointManager",
     "Metrics",
     "MetricsLogger",
+    "TrainingProgress",
     "RunDir",
     "log_step_progress",
     "resume_wandb",

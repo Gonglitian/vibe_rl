@@ -11,7 +11,9 @@ import numpy as np
 
 from vibe_rl.metrics import (
     MetricsLogger,
+    TrainingProgress,
     WandbBackend,
+    _fmt_time,
     _load_wandb_id,
     _save_wandb_id,
     log_step_progress,
@@ -346,3 +348,105 @@ class TestLogStepProgress:
             msg = mock_info.call_args[0][0]
             assert "0.0%" in msg
         logging.getLogger("vibe_rl").handlers.clear()
+
+
+# ---------------------------------------------------------------------------
+# Training progress bar
+# ---------------------------------------------------------------------------
+
+
+class TestFmtTime:
+    def test_seconds_only(self) -> None:
+        assert _fmt_time(45) == "00:45"
+
+    def test_minutes_and_seconds(self) -> None:
+        assert _fmt_time(125) == "02:05"
+
+    def test_hours(self) -> None:
+        assert _fmt_time(3661) == "1:01:01"
+
+    def test_zero(self) -> None:
+        assert _fmt_time(0) == "00:00"
+
+
+class TestTrainingProgress:
+    def test_update_writes_to_stderr(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100, prefix="TEST")
+            progress.update(50)
+            output = mock_stderr.getvalue()
+            assert "TEST" in output
+            assert "50/100" in output
+            assert "50.0%" in output
+
+    def test_update_with_metrics(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100, prefix="DQN")
+            progress.update(25, {"loss": 0.42, "reward": 195.0})
+            output = mock_stderr.getvalue()
+            assert "loss=0.42" in output
+            assert "reward=195" in output
+
+    def test_close_prints_newline(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100)
+            progress.close()
+            output = mock_stderr.getvalue()
+            assert output.endswith("\n")
+            assert "100.0%" in output
+
+    def test_close_idempotent(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100)
+            progress.close()
+            first_output = mock_stderr.getvalue()
+            progress.close()
+            assert mock_stderr.getvalue() == first_output
+
+    def test_update_after_close_is_noop(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100)
+            progress.close()
+            closed_output = mock_stderr.getvalue()
+            progress.update(50)
+            assert mock_stderr.getvalue() == closed_output
+
+    def test_skips_step_and_wall_time_in_metrics(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100)
+            progress.update(50, {"step": 50, "wall_time": 1.0, "loss": 0.5})
+            output = mock_stderr.getvalue()
+            assert "loss=0.5" in output
+            # step and wall_time should not appear in the metrics portion
+            assert "wall_time=" not in output
+
+    def test_bar_characters(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100, bar_width=10)
+            progress.update(50)
+            output = mock_stderr.getvalue()
+            assert "\u2588" in output  # filled block
+            assert "\u2591" in output  # empty block
+
+    def test_zero_total(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=0)
+            progress.update(0)
+            output = mock_stderr.getvalue()
+            assert "0.0%" in output
+
+    def test_no_prefix(self) -> None:
+        import io
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            progress = TrainingProgress(total=100)
+            progress.update(10)
+            output = mock_stderr.getvalue()
+            assert output.startswith("\r|")

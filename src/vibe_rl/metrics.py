@@ -393,3 +393,110 @@ def _to_python(val: Any) -> Any:
     if isinstance(val, (np.integer, np.floating)):
         return val.item()
     return val
+
+
+# ---------------------------------------------------------------------------
+# Training progress bar (zero external dependencies)
+# ---------------------------------------------------------------------------
+
+
+class TrainingProgress:
+    """Lightweight training progress bar using only the standard library.
+
+    Renders a single self-updating line to stderr::
+
+        DQN |████████████░░░░░░░░| 60.0%  30000/50000  [01:23 < 00:55, 361 it/s] loss=0.42 reward=195
+
+    Usage::
+
+        progress = TrainingProgress(total=50_000, prefix="DQN")
+        for step in range(1, 50_001):
+            ...
+            if step % log_interval == 0:
+                progress.update(step, {"loss": 0.42})
+        progress.close()
+
+    Parameters
+    ----------
+    total:
+        Total number of steps.
+    prefix:
+        Label shown before the bar (e.g. ``"DQN"``, ``"SAC"``).
+    bar_width:
+        Character width of the progress bar (default 30).
+    """
+
+    _BLOCK_FULL = "\u2588"  # █
+    _BLOCK_LIGHT = "\u2591"  # ░
+
+    def __init__(
+        self,
+        total: int,
+        prefix: str = "",
+        bar_width: int = 30,
+    ) -> None:
+        self.total = total
+        self.prefix = prefix
+        self.bar_width = bar_width
+        self._start_time = time.monotonic()
+        self._closed = False
+
+    def update(self, step: int, metrics: dict[str, Any] | None = None) -> None:
+        """Redraw the progress bar at the given *step*."""
+        if self._closed:
+            return
+        import sys
+
+        frac = step / self.total if self.total > 0 else 0.0
+        filled = int(self.bar_width * frac)
+        bar = self._BLOCK_FULL * filled + self._BLOCK_LIGHT * (self.bar_width - filled)
+
+        elapsed = time.monotonic() - self._start_time
+        speed = step / elapsed if elapsed > 0 else 0.0
+        remaining = (self.total - step) / speed if speed > 0 else 0.0
+
+        parts = []
+        if self.prefix:
+            parts.append(self.prefix)
+        parts.append(f"|{bar}|")
+        parts.append(f"{frac * 100:5.1f}%")
+        parts.append(f"{step}/{self.total}")
+        parts.append(
+            f"[{_fmt_time(elapsed)} < {_fmt_time(remaining)}, {speed:,.0f} it/s]"
+        )
+
+        if metrics:
+            kv = " ".join(
+                f"{k}={_to_python(v):.4g}"
+                if isinstance(_to_python(v), float)
+                else f"{k}={_to_python(v)}"
+                for k, v in metrics.items()
+                if k not in ("step", "wall_time")
+            )
+            if kv:
+                parts.append(kv)
+
+        line = "  ".join(parts)
+        sys.stderr.write(f"\r{line}")
+        sys.stderr.flush()
+
+    def close(self, metrics: dict[str, Any] | None = None) -> None:
+        """Finish the bar — print the final state and a newline."""
+        if self._closed:
+            return
+        self.update(self.total, metrics)
+        import sys
+
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+        self._closed = True
+
+
+def _fmt_time(seconds: float) -> str:
+    """Format seconds as ``MM:SS`` or ``HH:MM:SS``."""
+    s = int(seconds)
+    if s < 3600:
+        return f"{s // 60:02d}:{s % 60:02d}"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h:d}:{m:02d}:{s % 60:02d}"
