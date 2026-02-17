@@ -81,7 +81,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 
 # GPU (CUDA 12)
-uv sync && uv pip install --upgrade "jax[cuda12]"
+uv sync && uv pip install "jax[cuda12]"
 
 # TPU
 uv sync && uv pip install --upgrade "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
