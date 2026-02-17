@@ -98,6 +98,7 @@ class TestPPOMetricsIntegration:
             assert "critic_loss" in rec
             assert "entropy" in rec
             assert "approx_kl" in rec
+            assert "episode_return" in rec
 
         # Steps should be monotonically increasing
         steps = [r["step"] for r in records]
