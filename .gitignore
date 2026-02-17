@@ -31,3 +31,8 @@ Thumbs.db
 runs/
 *.pt
 *.pth
+
+# VitePress / Node
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
