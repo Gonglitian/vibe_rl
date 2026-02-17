@@ -1,0 +1,1 @@
+请你分析这些任务能否并行然后提交到kanban 并且启动worksession任务 
