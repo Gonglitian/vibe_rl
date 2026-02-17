@@ -42,7 +42,7 @@ from vibe_rl.algorithms.dqn.config import DQNConfig
 from vibe_rl.algorithms.dqn.types import DQNState
 from vibe_rl.dataprotocol.replay_buffer import ReplayBuffer
 from vibe_rl.env.base import EnvParams, EnvState, Environment
-from vibe_rl.metrics import MetricsLogger
+from vibe_rl.metrics import MetricsLogger, TrainingProgress
 from vibe_rl.run_dir import RunDir
 from vibe_rl.runner.config import RunnerConfig
 
@@ -165,10 +165,18 @@ def train_dqn(
         MetricsLogger(run_dir.log_path()) if run_dir is not None else None
     )
 
+    # --- Progress bar ---
+    progress = (
+        TrainingProgress(total=runner_config.total_timesteps, prefix="DQN")
+        if runner_config.progress_bar
+        else None
+    )
+
     episode_returns: list[float] = []
     metrics_log: list[dict[str, float]] = []
     ep_return = 0.0
     ep_length = 0
+    _last_log_record: dict[str, float] = {}
 
     try:
         for step in range(start_step, runner_config.total_timesteps + 1):
@@ -208,15 +216,21 @@ def train_dqn(
                         "epsilon": float(metrics.epsilon),
                     }
                     metrics_log.append(record)
+                    _last_log_record = record
                     if metrics_logger is not None:
                         metrics_logger.write(record)
                     if callback is not None:
                         callback(step, agent_state, record)
 
+            if progress is not None and step % runner_config.log_interval == 0:
+                progress.update(step, _last_log_record)
+
             # Periodic checkpointing
             if ckpt_mgr is not None:
                 ckpt_mgr.save(step, agent_state)
     finally:
+        if progress is not None:
+            progress.close()
         if metrics_logger is not None:
             metrics_logger.close()
         if ckpt_mgr is not None:

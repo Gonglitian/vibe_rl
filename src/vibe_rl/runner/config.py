@@ -44,5 +44,8 @@ class RunnerConfig:
     resume: bool = False  # resume from existing checkpoint
     overwrite: bool = False  # wipe existing checkpoints
 
+    # Progress bar
+    progress_bar: bool = True  # show a training progress bar
+
     # Auto-plotting
     plot: bool = True  # generate reward curve after training
